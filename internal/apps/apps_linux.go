@@ -11,15 +11,21 @@ import (
 )
 
 type Application struct {
-	DesktopID   string `json:"desktopId"`
-	Name        string `json:"name"`
-	Icon        string `json:"icon,omitempty"`
-	ProcessPath string `json:"processPath"`
+	DesktopID    string `json:"desktopId"`
+	Name         string `json:"name"`
+	Icon         string `json:"icon,omitempty"`
+	LauncherPath string `json:"launcherPath"`
+}
+
+type Process struct {
+	Name         string `json:"name"`
+	ProcessPath  string `json:"processPath"`
+	ProcessCount int    `json:"processCount"`
+	AppImage     bool   `json:"appImage"`
 }
 
 func List() []Application {
 	seen := map[string]bool{}
-	running := runningProcessPaths()
 	var applications []Application
 	for _, directory := range applicationDirectories() {
 		entries, err := os.ReadDir(directory)
@@ -30,7 +36,7 @@ func List() []Application {
 			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".desktop") || seen[entry.Name()] {
 				continue
 			}
-			application, ok := parseDesktopFile(filepath.Join(directory, entry.Name()), entry.Name(), running)
+			application, ok := parseDesktopFile(filepath.Join(directory, entry.Name()), entry.Name())
 			if !ok {
 				continue
 			}
@@ -42,6 +48,59 @@ func List() []Application {
 		return strings.ToLower(applications[i].Name) < strings.ToLower(applications[j].Name)
 	})
 	return applications
+}
+
+// Processes returns executable paths read directly from /proc/PID/exe. Unlike
+// desktop Exec= commands, these are the paths the kernel and sing-box observe
+// for running applications. Entries sharing an executable are grouped so the
+// shell can present one exact path instead of dozens of Chromium subprocesses.
+func Processes() []Process {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return []Process{}
+	}
+	grouped := map[string]*Process{}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if _, err := strconv.Atoi(entry.Name()); err != nil {
+			continue
+		}
+		processDirectory := filepath.Join("/proc", entry.Name())
+		processPath, err := os.Readlink(filepath.Join(processDirectory, "exe"))
+		if err != nil {
+			continue
+		}
+		processPath = strings.TrimSuffix(processPath, " (deleted)")
+		if !filepath.IsAbs(processPath) {
+			continue
+		}
+		name := strings.TrimSpace(readText(filepath.Join(processDirectory, "comm")))
+		if name == "" {
+			name = filepath.Base(processPath)
+		}
+		candidate := grouped[processPath]
+		if candidate == nil {
+			candidate = &Process{
+				Name:        name,
+				ProcessPath: processPath,
+				AppImage:    isAppImage(processPath),
+			}
+			grouped[processPath] = candidate
+		}
+		candidate.ProcessCount++
+	}
+	processes := make([]Process, 0, len(grouped))
+	for _, process := range grouped {
+		processes = append(processes, *process)
+	}
+	sort.Slice(processes, func(i, j int) bool {
+		left := strings.ToLower(processes[i].Name + "\x00" + processes[i].ProcessPath)
+		right := strings.ToLower(processes[j].Name + "\x00" + processes[j].ProcessPath)
+		return left < right
+	})
+	return processes
 }
 
 func applicationDirectories() []string {
@@ -61,7 +120,7 @@ func applicationDirectories() []string {
 	return directories
 }
 
-func parseDesktopFile(path, desktopID string, running map[string]string) (Application, bool) {
+func parseDesktopFile(path, desktopID string) (Application, bool) {
 	file, err := os.Open(path)
 	if err != nil {
 		return Application{}, false
@@ -102,23 +161,11 @@ func parseDesktopFile(path, desktopID string, running map[string]string) (Applic
 		return Application{}, false
 	}
 	return Application{
-		DesktopID:   desktopID,
-		Name:        values["Name"],
-		Icon:        values["Icon"],
-		ProcessPath: resolveProcessPath(executable, running),
+		DesktopID:    desktopID,
+		Name:         values["Name"],
+		Icon:         values["Icon"],
+		LauncherPath: executable,
 	}, true
-}
-
-// PathsByDesktopID returns the executable path sing-box will actually see for
-// every installed desktop application. Desktop launchers are often only small
-// wrappers (for example /usr/bin/chromium starts /usr/lib/chromium/chromium),
-// so using the Exec= path verbatim makes process_path routing silently miss.
-func PathsByDesktopID() map[string]string {
-	paths := map[string]string{}
-	for _, application := range List() {
-		paths[application.DesktopID] = application.ProcessPath
-	}
-	return paths
 }
 
 func firstExecToken(command string) string {
@@ -245,93 +292,16 @@ func resolveExecutable(command string) string {
 	return path
 }
 
-func resolveProcessPath(launcher string, running map[string]string) string {
-	if processPath := running[strings.ToLower(filepath.Base(launcher))]; processPath != "" && processPath != launcher {
-		return processPath
-	}
-	if processPath := packagedProcessPath(launcher); processPath != "" {
-		return processPath
-	}
-	return launcher
-}
-
-func runningProcessPaths() map[string]string {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return map[string]string{}
-	}
-	counts := map[string]map[string]int{}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		if _, err := strconv.Atoi(entry.Name()); err != nil {
-			continue
-		}
-		processPath, err := os.Readlink(filepath.Join("/proc", entry.Name(), "exe"))
-		if err != nil {
-			continue
-		}
-		processPath = strings.TrimSuffix(processPath, " (deleted)")
-		if executableFile(processPath) {
-			base := strings.ToLower(filepath.Base(processPath))
-			if counts[base] == nil {
-				counts[base] = map[string]int{}
-			}
-			counts[base][processPath]++
-		}
-	}
-	paths := map[string]string{}
-	for base, candidates := range counts {
-		for processPath, count := range candidates {
-			best := paths[base]
-			if best == "" || count > candidates[best] || count == candidates[best] && processPath < best {
-				paths[base] = processPath
-			}
-		}
-	}
-	return paths
-}
-
-func packagedProcessPath(launcher string) string {
-	base := filepath.Base(launcher)
-	for _, root := range []string{
-		filepath.Join("/usr/lib", base),
-		filepath.Join("/usr/lib64", base),
-		filepath.Join("/opt", base),
-	} {
-		if processPath := matchingExecutable(root, base, 2); processPath != "" {
-			return processPath
-		}
-	}
-	return ""
-}
-
-func matchingExecutable(root, base string, depth int) string {
-	if depth < 0 {
-		return ""
-	}
-	entries, err := os.ReadDir(root)
+func readText(path string) string {
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
-	for _, entry := range entries {
-		candidate := filepath.Join(root, entry.Name())
-		if !entry.IsDir() && strings.EqualFold(entry.Name(), base) && executableFile(candidate) {
-			return candidate
-		}
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			if candidate := matchingExecutable(filepath.Join(root, entry.Name()), base, depth-1); candidate != "" {
-				return candidate
-			}
-		}
-	}
-	return ""
+	return string(raw)
 }
 
-func executableFile(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0
+func isAppImage(processPath string) bool {
+	lowerPath := strings.ToLower(processPath)
+	return strings.Contains(lowerPath, "/.mount_") ||
+		strings.HasSuffix(lowerPath, ".appimage")
 }

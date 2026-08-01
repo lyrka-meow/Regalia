@@ -24,8 +24,8 @@ project's source tree or Git history.
   SOCKS, HTTP, and JSON server formats;
 - keep the previous valid server list when a subscription refresh fails;
 - select a connection-ready server;
-- discover installed Linux applications from `.desktop` files, resolve launcher
-  wrappers to the executable paths seen by sing-box, and migrate saved rules;
+- discover installed Linux applications from `.desktop` files while reading
+  exact routing paths only from `/proc/PID/exe` after the process is running;
 - persist route profiles with `proxy` or `direct` application rules;
 - generate a sing-box TUN configuration;
 - validate configurations with `sing-box check` before every connection;
@@ -77,6 +77,7 @@ go run ./cmd/regalia status
 go run ./cmd/regalia connect
 go run ./cmd/regalia disconnect
 go run ./cmd/regalia apps
+go run ./cmd/regalia processes
 go run ./cmd/regalia profile add Main https://example.com/subscription
 go run ./cmd/regalia profiles
 go run ./cmd/regalia servers
@@ -93,6 +94,10 @@ name, kernel version, and distribution name in the compatibility headers used
 by device-bound subscription providers. This is automatic and intentionally
 has no desktop toggle, so a subscription behaves the same in the TUI and in a
 desktop shell.
+
+Application routing intentionally does not support AppImage. AppImage mounts
+its executable below a different temporary `/tmp/.mount_*` directory on every
+launch, so it cannot provide a stable exact `process_path` rule.
 
 Arch packaging paths and the privilege boundary are documented in
 [`packaging/README.md`](packaging/README.md). The repository does not bundle a

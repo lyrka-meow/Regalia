@@ -4,7 +4,7 @@
 
 ### `regaliad`
 
-`regaliad` owns persistent VPN state and exposes API version 3 over a local Unix
+`regaliad` owns persistent VPN state and exposes API version 4 over a local Unix
 socket. The socket directory is private to the current user, and the socket is
 created with mode `0600`.
 
@@ -45,16 +45,17 @@ Request:
 Response:
 
 ```json
-{"id":1,"result":{"apiVersion":3}}
+{"id":1,"result":{"apiVersion":4}}
 ```
 
-API version 3 currently exposes:
+API version 4 currently exposes:
 
 - `status`
 - `vpn.connect`
 - `vpn.disconnect`
 - `vpn.setEnabled`
 - `apps.list`
+- `apps.processes`
 - `profiles.list`
 - `profiles.create`
 - `profiles.delete`
@@ -70,10 +71,19 @@ API version 3 currently exposes:
 
 ## Routing model
 
-Every route profile has a default outbound: `proxy` or `direct`. Application
-exceptions use absolute executable paths resolved from installed `.desktop`
-files. The generated sing-box configuration converts those rules to
-`process_path` entries.
+Every route profile has a default outbound: `proxy` or `direct`. The desktop
+`Exec=` value is never trusted as a routing rule. Application exceptions use
+absolute executable paths confirmed from `/proc/PID/exe` while the process is
+running, and the generated sing-box configuration converts them to
+`process_path` entries. AppImage is intentionally unsupported because its
+mount path changes on every launch.
+
+The per-user daemon deliberately does not use systemd options which create a
+private mount namespace (`PrivateTmp`, `PrivateDevices`, or the `Protect*`
+filesystem family). With Linux ptrace restrictions, a process in such a mount
+namespace cannot dereference `/proc/PID/exe` for ordinary applications even
+when they belong to the same user. The daemon remains an ordinary unprivileged
+user process and retains `NoNewPrivileges` and namespace restrictions.
 
 Only the local user can access the API and state. The UI-facing daemon remains
 unprivileged and delegates only TUN startup and shutdown to the engine bridge.
@@ -124,5 +134,5 @@ direct child for isolated development and tests. It does not grant TUN
 privileges and is not the packaged production mode.
 
 The next implementation boundary is event streaming and the native QuickShell
-client module. API version 3 can already be integrated through its private
+client module. API version 4 can already be integrated through its private
 socket with short status polling.

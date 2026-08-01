@@ -61,6 +61,8 @@ func (t *terminal) runCommand(arguments []string) error {
 		return t.printMethod("vpn.disconnect", nil)
 	case "apps":
 		return t.printMethod("apps.list", nil)
+	case "processes":
+		return t.printMethod("apps.processes", nil)
 	case "profiles":
 		return t.printMethod("profiles.list", nil)
 	case "servers":
@@ -439,5 +441,6 @@ func commandHelp() string {
   regalia servers
   regalia server select SERVER_ID
   regalia routes
-  regalia apps`
+  regalia apps
+  regalia processes`
 }

@@ -35,16 +35,46 @@ func TestApplicationExecTokenSkipsLaunchWrappers(t *testing.T) {
 	}
 }
 
-func TestMatchingExecutableFindsCaseInsensitivePackagedBinary(t *testing.T) {
-	root := t.TempDir()
-	processPath := filepath.Join(root, "current", "Discord")
-	if err := os.MkdirAll(filepath.Dir(processPath), 0o755); err != nil {
+func TestAppImageDetection(t *testing.T) {
+	if !isAppImage("/tmp/.mount_Test42/usr/bin/app") {
+		t.Fatal("temporary AppImage mount was not detected")
+	}
+	if !isAppImage("/home/user/Example.AppImage") {
+		t.Fatal("AppImage command was not detected")
+	}
+	if isAppImage("/usr/lib/chromium/chromium") {
+		t.Fatal("ordinary application detected as AppImage")
+	}
+}
+
+func TestProcessesIncludesCurrentExecutable(t *testing.T) {
+	current, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(processPath, []byte("test"), 0o755); err != nil {
-		t.Fatal(err)
+	if resolved, err := filepath.EvalSymlinks(current); err == nil {
+		current = resolved
 	}
-	if actual := matchingExecutable(root, "discord", 2); actual != processPath {
-		t.Fatalf("matchingExecutable() = %q, want %q", actual, processPath)
+	for _, process := range Processes() {
+		if process.ProcessPath == current {
+			if process.ProcessCount < 1 {
+				t.Fatalf("invalid process count: %#v", process)
+			}
+			return
+		}
 	}
+	t.Fatalf("current executable %q was not discovered through /proc", current)
+}
+
+func TestProcessesIncludesExpectedExecutable(t *testing.T) {
+	expected := os.Getenv("REGALIA_TEST_EXPECT_PROCESS")
+	if expected == "" {
+		t.Skip("REGALIA_TEST_EXPECT_PROCESS is not set")
+	}
+	for _, process := range Processes() {
+		if process.ProcessPath == expected {
+			return
+		}
+	}
+	t.Fatalf("running executable %q was not discovered through /proc", expected)
 }

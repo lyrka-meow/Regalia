@@ -369,30 +369,6 @@ func (s *Store) SetAppRule(routeID string, rule AppRule) error {
 	return s.saveLocked()
 }
 
-// ReconcileAppPaths migrates stored desktop rules from launcher paths to the
-// executable paths observed by sing-box. This keeps existing user profiles
-// working after a launcher/real-process distinction is discovered.
-func (s *Store) ReconcileAppPaths(paths map[string]string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	changed := false
-	for routeIndex := range s.data.RouteProfiles {
-		for appIndex := range s.data.RouteProfiles[routeIndex].Apps {
-			rule := &s.data.RouteProfiles[routeIndex].Apps[appIndex]
-			processPath := filepath.Clean(strings.TrimSpace(paths[rule.DesktopID]))
-			if rule.DesktopID == "" || !filepath.IsAbs(processPath) || processPath == rule.ProcessPath {
-				continue
-			}
-			rule.ProcessPath = processPath
-			changed = true
-		}
-	}
-	if !changed {
-		return false, nil
-	}
-	return true, s.saveLocked()
-}
-
 func (s *Store) RemoveAppRule(routeID, processPath string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

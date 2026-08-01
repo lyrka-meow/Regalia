@@ -183,7 +183,7 @@ func TestVPNLifecycleAndConfigurationLock(t *testing.T) {
 		t.Fatalf("engine received invalid configuration: %s", controller.configuration)
 	}
 	status := result.(map[string]any)
-	if status["apiVersion"] != 3 || status["enabled"] != true || status["engine"] != engine.StateConnected || status["connected"] != true || status["enginePid"] != 4242 {
+	if status["apiVersion"] != 4 || status["enabled"] != true || status["engine"] != engine.StateConnected || status["connected"] != true || status["enginePid"] != 4242 {
 		t.Fatalf("unexpected connected status: %#v", status)
 	}
 	activeServer, ok := status["activeServer"].(serverView)

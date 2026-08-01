@@ -10,15 +10,6 @@ RestartSec=2s
 TimeoutStopSec=20s
 
 NoNewPrivileges=yes
-CapabilityBoundingSet=
-AmbientCapabilities=
-PrivateDevices=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectControlGroups=yes
-ProtectKernelLogs=yes
-ProtectKernelModules=yes
-ProtectKernelTunables=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RestrictNamespaces=yes

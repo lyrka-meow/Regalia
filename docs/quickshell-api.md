@@ -18,7 +18,7 @@ Response:
 {
   "id": 1,
   "result": {
-    "apiVersion": 3,
+    "apiVersion": 4,
     "enabled": true,
     "connected": true,
     "engine": "connected",
@@ -47,7 +47,7 @@ Important response fields:
 
 | Field | Meaning |
 | --- | --- |
-| `apiVersion` | Current protocol version, presently `3` |
+| `apiVersion` | Current protocol version, presently `4` |
 | `capabilities` | Features the client may expose |
 | `enabled` | Persisted VPN toggle state |
 | `connected` | Engine is currently connected |
@@ -61,7 +61,7 @@ Important response fields:
 | `activeRoute` | Active route profile summary |
 
 The shell can poll `status` while the VPN page is visible. Event streaming is
-not part of API version 3 yet.
+not part of API version 4 yet.
 
 ## Setup screens
 
@@ -71,6 +71,8 @@ Use the remaining methods to build the settings UI:
   `profiles.delete`;
 - server picker: `servers.list`, `servers.select`;
 - installed application picker: `apps.list`;
+- exact running-process picker: `apps.processes` (paths come directly from
+  `/proc/PID/exe` and duplicate executable paths are grouped);
 - route profiles: `routes.list`, `routes.create`, `routes.delete`,
   `routes.activate`, `routes.app.set`, `routes.app.remove`.
 

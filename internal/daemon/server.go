@@ -162,6 +162,8 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 		return s.setVPNEnabled(*params.Enabled)
 	case "apps.list":
 		return apps.List(), nil
+	case "apps.processes":
+		return apps.Processes(), nil
 	case "profiles.list":
 		profiles := s.store.Snapshot().Profiles
 		result := make([]profileView, 0, len(profiles))
@@ -359,6 +361,7 @@ func (s *Server) status() map[string]any {
 			"servers",
 			"routes.processPath",
 			"apps.desktop",
+			"apps.processes",
 		},
 		"enabled":         snapshot.VPNEnabled,
 		"engine":          engineStatus.State,
@@ -463,16 +466,6 @@ func (s *Server) restoreError() string {
 func (s *Server) reconcileVPN(enabled bool) error {
 	status := s.engine.Status()
 	if enabled {
-		pathsChanged, err := s.store.ReconcileAppPaths(apps.PathsByDesktopID())
-		if err != nil {
-			return fmt.Errorf("refresh application process paths: %w", err)
-		}
-		if pathsChanged && engine.Active(status) {
-			if err := s.engine.Stop(); err != nil && !errors.Is(err, engine.ErrNotRunning) {
-				return fmt.Errorf("restart VPN after refreshing application process paths: %w", err)
-			}
-			status = s.engine.Status()
-		}
 		switch status.State {
 		case engine.StateConnected, engine.StateStarting:
 			return nil
