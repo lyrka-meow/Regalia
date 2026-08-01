@@ -15,6 +15,23 @@ The project consists of:
 Regalia is implemented as a clean Go project and does not inherit another
 project's source tree or Git history.
 
+## Install on Arch Linux
+
+Run the installer as your ordinary desktop user:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lyrka-meow/Regalia/main/installer/install-github.sh | bash
+```
+
+The menu offers a ready-made rolling binary (recommended) or a local build from
+the latest `main`. Both modes install and verify the supported official
+`sing-box` build, install the systemd and polkit integration, and enable the
+per-user `regaliad` service. MacqueenDE discovers Regalia automatically the
+next time its VPN settings page is opened.
+
+The installer currently supports Arch Linux on `x86_64` and `aarch64`. Do not
+run it through `sudo`; it requests elevated access only for system files.
+
 ## Current capabilities
 
 - create, refresh, list, and delete subscription profiles;
