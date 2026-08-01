@@ -93,7 +93,7 @@ func parseDesktopFile(path, desktopID string) (Application, bool) {
 
 	command := values["TryExec"]
 	if command == "" {
-		command = firstExecToken(values["Exec"])
+		command = applicationExecToken(values["Exec"])
 	}
 	executable := resolveExecutable(command)
 	if values["Name"] == "" || executable == "" {
@@ -108,13 +108,29 @@ func parseDesktopFile(path, desktopID string) (Application, bool) {
 }
 
 func firstExecToken(command string) string {
-	command = strings.TrimSpace(command)
-	if command == "" {
+	tokens := execTokens(command)
+	if len(tokens) == 0 {
 		return ""
 	}
+	return tokens[0]
+}
+
+func execTokens(command string) []string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return nil
+	}
+	var tokens []string
 	var token strings.Builder
 	var quote rune
 	escaped := false
+	flush := func() {
+		value := token.String()
+		token.Reset()
+		if value != "" && !strings.HasPrefix(value, "%") {
+			tokens = append(tokens, value)
+		}
+	}
 	for _, character := range command {
 		if escaped {
 			token.WriteRune(character)
@@ -138,15 +154,55 @@ func firstExecToken(command string) string {
 			continue
 		}
 		if character == ' ' || character == '\t' {
-			break
+			flush()
+			continue
 		}
 		token.WriteRune(character)
 	}
-	value := token.String()
-	if strings.HasPrefix(value, "%") {
+	flush()
+	return tokens
+}
+
+func applicationExecToken(command string) string {
+	tokens := execTokens(command)
+	for len(tokens) > 0 {
+		name := filepath.Base(tokens[0])
+		switch name {
+		case "prime-run", "gamemoderun", "nohup", "command", "exec":
+			tokens = tokens[1:]
+			continue
+		case "env":
+			tokens = tokens[1:]
+			for len(tokens) > 0 {
+				if strings.Contains(tokens[0], "=") {
+					tokens = tokens[1:]
+					continue
+				}
+				if tokens[0] == "-u" || tokens[0] == "--unset" || tokens[0] == "-C" || tokens[0] == "--chdir" {
+					if len(tokens) < 2 {
+						return ""
+					}
+					tokens = tokens[2:]
+					continue
+				}
+				if strings.HasPrefix(tokens[0], "-") {
+					tokens = tokens[1:]
+					continue
+				}
+				break
+			}
+			continue
+		case "sh", "bash":
+			if len(tokens) >= 3 && tokens[1] == "-c" {
+				return applicationExecToken(tokens[2])
+			}
+		}
+		break
+	}
+	if len(tokens) == 0 || strings.HasPrefix(tokens[0], "%") {
 		return ""
 	}
-	return value
+	return tokens[0]
 }
 
 func resolveExecutable(command string) string {
