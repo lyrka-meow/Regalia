@@ -1,16 +1,21 @@
 package daemon
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lyrka-meow/Regalia/internal/engine"
 	"github.com/lyrka-meow/Regalia/internal/state"
+	"github.com/lyrka-meow/Regalia/internal/subscription"
 )
 
 type fakeEngine struct {
@@ -18,6 +23,8 @@ type fakeEngine struct {
 	configuration []byte
 	starts        int
 	stops         int
+	startErr      error
+	stopErr       error
 }
 
 func (f *fakeEngine) Status() engine.Status {
@@ -27,12 +34,18 @@ func (f *fakeEngine) Status() engine.Status {
 func (f *fakeEngine) Start(configuration []byte) error {
 	f.starts++
 	f.configuration = append([]byte(nil), configuration...)
+	if f.startErr != nil {
+		return f.startErr
+	}
 	f.status = engine.Status{State: engine.StateConnected, Available: true, PID: 4242}
 	return nil
 }
 
 func (f *fakeEngine) Stop() error {
 	f.stops++
+	if f.stopErr != nil {
+		return f.stopErr
+	}
 	f.status = engine.Status{State: engine.StateStopped, Available: true}
 	return nil
 }
@@ -146,6 +159,9 @@ func TestVPNLifecycleAndConfigurationLock(t *testing.T) {
 	if controller.starts != 0 {
 		t.Fatal("engine started with incomplete configuration")
 	}
+	if store.Snapshot().VPNEnabled {
+		t.Fatal("incomplete configuration persisted the enabled state")
+	}
 
 	profile, err := store.CreateProfile("Main", subscriptionServer.URL)
 	if err != nil {
@@ -167,8 +183,25 @@ func TestVPNLifecycleAndConfigurationLock(t *testing.T) {
 		t.Fatalf("engine received invalid configuration: %s", controller.configuration)
 	}
 	status := result.(map[string]any)
-	if status["apiVersion"] != 2 || status["engine"] != engine.StateConnected || status["connected"] != true || status["enginePid"] != 4242 {
+	if status["apiVersion"] != 3 || status["enabled"] != true || status["engine"] != engine.StateConnected || status["connected"] != true || status["enginePid"] != 4242 {
 		t.Fatalf("unexpected connected status: %#v", status)
+	}
+	activeServer, ok := status["activeServer"].(serverView)
+	if !ok || activeServer.ID != serverID || activeServer.Name != "Warsaw" {
+		t.Fatalf("active server summary missing: %#v", status["activeServer"])
+	}
+	publicStatus, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(publicStatus), "secret") {
+		t.Fatal("status exposed server credentials")
+	}
+	if _, apiError := server.dispatch("vpn.connect", nil); apiError != nil {
+		t.Fatalf("idempotent connect returned %#v", apiError)
+	}
+	if controller.starts != 1 {
+		t.Fatalf("idempotent connect started engine %d times", controller.starts)
 	}
 	if _, apiError := server.dispatch("servers.select", params(t, map[string]string{"id": serverID})); apiError == nil || apiError.Code != "vpn_active" {
 		t.Fatalf("active configuration mutation returned %#v", apiError)
@@ -182,9 +215,140 @@ func TestVPNLifecycleAndConfigurationLock(t *testing.T) {
 		t.Fatalf("engine stop count is %d, want 1", controller.stops)
 	}
 	status = result.(map[string]any)
-	if status["engine"] != engine.StateStopped || status["connected"] != false {
+	if status["enabled"] != false || status["engine"] != engine.StateStopped || status["connected"] != false {
 		t.Fatalf("unexpected disconnected status: %#v", status)
 	}
+}
+
+func TestRestoreDesiredVPNState(t *testing.T) {
+	store := configuredStore(t)
+	if err := store.SetVPNEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeEngine{status: engine.Status{State: engine.StateStopped, Available: true}}
+	server := NewWithEngine(filepath.Join(t.TempDir(), "regaliad.sock"), store, controller)
+	server.restoreDesiredState()
+	if controller.starts != 1 || controller.status.State != engine.StateConnected {
+		t.Fatalf("VPN was not restored: %#v", controller)
+	}
+	if status := server.status(); status["enabled"] != true || status["restoreError"] != nil {
+		t.Fatalf("unexpected restored status: %#v", status)
+	}
+}
+
+func TestRestoreFailureIsReportedWithoutClearingIntent(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetVPNEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeEngine{status: engine.Status{State: engine.StateStopped, Available: true}}
+	server := NewWithEngine(filepath.Join(t.TempDir(), "regaliad.sock"), store, controller)
+	server.restoreDesiredState()
+	status := server.status()
+	if status["enabled"] != true || status["restoreError"] == nil {
+		t.Fatalf("restore error or desired state missing: %#v", status)
+	}
+	if controller.starts != 0 {
+		t.Fatal("engine started with incomplete restored configuration")
+	}
+}
+
+func TestFailedStartKeepsEnabledIntent(t *testing.T) {
+	store := configuredStore(t)
+	controller := &fakeEngine{
+		status:   engine.Status{State: engine.StateStopped, Available: true},
+		startErr: errors.New("TUN failed"),
+	}
+	server := NewWithEngine(filepath.Join(t.TempDir(), "regaliad.sock"), store, controller)
+	if _, apiError := server.dispatch("vpn.setEnabled", params(t, map[string]bool{"enabled": true})); apiError == nil || apiError.Code != "engine_start_failed" {
+		t.Fatalf("failed start returned %#v", apiError)
+	}
+	if !store.Snapshot().VPNEnabled {
+		t.Fatal("failed engine start cleared the user's enabled intent")
+	}
+}
+
+func TestRestoreDisabledStateStopsStaleEngine(t *testing.T) {
+	store := configuredStore(t)
+	controller := &fakeEngine{status: engine.Status{State: engine.StateConnected, Available: true}}
+	server := NewWithEngine(filepath.Join(t.TempDir(), "regaliad.sock"), store, controller)
+	server.restoreDesiredState()
+	if controller.stops != 1 || controller.status.State != engine.StateStopped {
+		t.Fatalf("stale engine was not stopped: %#v", controller)
+	}
+}
+
+func TestSetEnabledRequiresBoolean(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := New(filepath.Join(t.TempDir(), "regaliad.sock"), store)
+	if _, apiError := server.dispatch("vpn.setEnabled", params(t, map[string]any{})); apiError == nil || apiError.Code != "invalid_params" {
+		t.Fatalf("missing enabled returned %#v", apiError)
+	}
+}
+
+func TestContextShutdownStopsEngine(t *testing.T) {
+	store := configuredStore(t)
+	if err := store.SetVPNEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeEngine{status: engine.Status{State: engine.StateConnected, Available: true}}
+	socketPath := filepath.Join(t.TempDir(), "regaliad.sock")
+	server := NewWithEngine(socketPath, store, controller)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- server.ListenAndServeContext(ctx)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(socketPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("daemon socket was not created")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if controller.stops != 1 {
+		t.Fatalf("shutdown stopped engine %d times, want 1", controller.stops)
+	}
+}
+
+func configuredStore(t *testing.T) *state.Store {
+	t.Helper()
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := store.CreateProfile("Main", "https://example.invalid/sub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.ReplaceServers(profile.ID, []subscription.Server{{
+		Name:     "Warsaw",
+		Protocol: "trojan",
+		Address:  "vpn.example",
+		Port:     443,
+		Source:   "trojan://secret@vpn.example:443#Warsaw",
+		Outbound: json.RawMessage(`{"type":"trojan","server":"vpn.example","server_port":443,"password":"secret"}`),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SelectServer(updated.Servers[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	return store
 }
 
 func params(t *testing.T, value any) json.RawMessage {

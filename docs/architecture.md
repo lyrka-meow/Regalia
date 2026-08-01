@@ -4,7 +4,7 @@
 
 ### `regaliad`
 
-`regaliad` owns persistent VPN state and exposes API version 2 over a local Unix
+`regaliad` owns persistent VPN state and exposes API version 3 over a local Unix
 socket. The socket directory is private to the current user, and the socket is
 created with mode `0600`.
 
@@ -45,14 +45,15 @@ Request:
 Response:
 
 ```json
-{"id":1,"result":{"apiVersion":2}}
+{"id":1,"result":{"apiVersion":3}}
 ```
 
-API version 2 currently exposes:
+API version 3 currently exposes:
 
 - `status`
 - `vpn.connect`
 - `vpn.disconnect`
+- `vpn.setEnabled`
 - `apps.list`
 - `profiles.list`
 - `profiles.create`
@@ -122,5 +123,6 @@ stopped when the daemon exits normally.
 direct child for isolated development and tests. It does not grant TUN
 privileges and is not the packaged production mode.
 
-The next implementation boundary is connection restoration after login and the
-QuickShell-facing client integration.
+The next implementation boundary is event streaming and the native QuickShell
+client module. API version 3 can already be integrated through its private
+socket with short status polling.

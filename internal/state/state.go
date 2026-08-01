@@ -55,6 +55,7 @@ type RouteProfile struct {
 
 type State struct {
 	SchemaVersion  int                   `json:"schemaVersion"`
+	VPNEnabled     bool                  `json:"vpnEnabled"`
 	ActiveRouteID  string                `json:"activeRouteId,omitempty"`
 	ActiveServerID string                `json:"activeServerId,omitempty"`
 	Profiles       []SubscriptionProfile `json:"profiles"`
@@ -65,6 +66,21 @@ type Store struct {
 	mu   sync.RWMutex
 	path string
 	data State
+}
+
+func (s *Store) SetVPNEnabled(enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.VPNEnabled == enabled {
+		return nil
+	}
+	previous := s.data.VPNEnabled
+	s.data.VPNEnabled = enabled
+	if err := s.saveLocked(); err != nil {
+		s.data.VPNEnabled = previous
+		return err
+	}
+	return nil
 }
 
 func Open(path string) (*Store, error) {

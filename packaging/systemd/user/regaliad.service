@@ -1,0 +1,32 @@
+[Unit]
+Description=Regalia per-user VPN control service
+Documentation=https://github.com/lyrka-meow/Regalia
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/regaliad
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=20s
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=default.target

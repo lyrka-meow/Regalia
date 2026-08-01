@@ -53,6 +53,34 @@ func TestStatePersists(t *testing.T) {
 	}
 }
 
+func TestVPNEnabledPersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetVPNEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reopened.Snapshot().VPNEnabled {
+		t.Fatal("enabled VPN state was not persisted")
+	}
+	if err := reopened.SetVPNEnabled(false); err != nil {
+		t.Fatal(err)
+	}
+	again, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Snapshot().VPNEnabled {
+		t.Fatal("disabled VPN state was not persisted")
+	}
+}
+
 func TestReplaceServersKeepsStableIDsAndSelection(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {

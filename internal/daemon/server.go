@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/lyrka-meow/Regalia/internal/apps"
 	"github.com/lyrka-meow/Regalia/internal/config"
@@ -23,6 +24,9 @@ type Server struct {
 	store      *state.Store
 	fetcher    *subscription.Fetcher
 	engine     engine.Controller
+	vpnMu      sync.Mutex
+	restoreMu  sync.RWMutex
+	restoreErr string
 }
 
 type profileView struct {
@@ -43,6 +47,14 @@ type serverView struct {
 	Ready    bool   `json:"ready"`
 }
 
+type routeSummaryView struct {
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	DefaultOutbound string `json:"defaultOutbound"`
+}
+
+var errVPNConfigurationIncomplete = errors.New("VPN configuration is incomplete")
+
 func New(socketPath string, store *state.Store) *Server {
 	return NewWithEngine(socketPath, store, engine.NewUnavailable("VPN engine controller is not configured"))
 }
@@ -60,7 +72,13 @@ func NewWithEngine(socketPath string, store *state.Store, controller engine.Cont
 }
 
 func (s *Server) ListenAndServe() error {
+	return s.ListenAndServeContext(context.Background())
+}
+
+func (s *Server) ListenAndServeContext(ctx context.Context) error {
 	defer func() {
+		s.vpnMu.Lock()
+		defer s.vpnMu.Unlock()
 		if engine.Active(s.engine.Status()) {
 			_ = s.engine.Stop()
 		}
@@ -84,10 +102,18 @@ func (s *Server) ListenAndServe() error {
 	if err := os.Chmod(s.socketPath, 0o600); err != nil {
 		return fmt.Errorf("protect socket: %w", err)
 	}
+	stopClosing := context.AfterFunc(ctx, func() {
+		_ = listener.Close()
+	})
+	defer stopClosing()
+	s.restoreDesiredState()
 
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
 			return err
 		}
 		go s.serveConnection(connection)
@@ -120,19 +146,20 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 	case "status":
 		return s.status(), nil
 	case "vpn.connect":
-		result, err := config.Build(s.store.Snapshot())
-		if err != nil {
-			return nil, &protocol.Error{Code: "configuration_incomplete", Message: err.Error()}
-		}
-		if err := s.engine.Start(result.JSON); err != nil {
-			return nil, &protocol.Error{Code: "engine_start_failed", Message: err.Error()}
-		}
-		return s.status(), nil
+		return s.setVPNEnabled(true)
 	case "vpn.disconnect":
-		if err := s.engine.Stop(); err != nil && !errors.Is(err, engine.ErrNotRunning) {
-			return nil, &protocol.Error{Code: "engine_stop_failed", Message: err.Error()}
+		return s.setVPNEnabled(false)
+	case "vpn.setEnabled":
+		var params struct {
+			Enabled *bool `json:"enabled"`
 		}
-		return s.status(), nil
+		if err := decodeParams(raw, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		if params.Enabled == nil {
+			return nil, invalidParams(errors.New("enabled is required"))
+		}
+		return s.setVPNEnabled(*params.Enabled)
 	case "apps.list":
 		return apps.List(), nil
 	case "profiles.list":
@@ -156,6 +183,8 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 		}
 		return publicProfile(profile), nil
 	case "profiles.delete":
+		s.vpnMu.Lock()
+		defer s.vpnMu.Unlock()
 		if apiError := s.requireStopped(); apiError != nil {
 			return nil, apiError
 		}
@@ -167,6 +196,8 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 		}
 		return emptyOrError(s.store.DeleteProfile(params.ID))
 	case "profiles.refresh":
+		s.vpnMu.Lock()
+		defer s.vpnMu.Unlock()
 		if apiError := s.requireStopped(); apiError != nil {
 			return nil, apiError
 		}
@@ -217,6 +248,8 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 			"profiles":       groups,
 		}, nil
 	case "servers.select":
+		s.vpnMu.Lock()
+		defer s.vpnMu.Unlock()
 		if apiError := s.requireStopped(); apiError != nil {
 			return nil, apiError
 		}
@@ -241,6 +274,8 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 			"items":         snapshot.RouteProfiles,
 		}, nil
 	case "routes.create":
+		s.vpnMu.Lock()
+		defer s.vpnMu.Unlock()
 		if apiError := s.requireStopped(); apiError != nil {
 			return nil, apiError
 		}
@@ -254,6 +289,8 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 		route, err := s.store.CreateRoute(params.Name, params.DefaultOutbound)
 		return resultOrError(route, err)
 	case "routes.delete":
+		s.vpnMu.Lock()
+		defer s.vpnMu.Unlock()
 		if apiError := s.requireStopped(); apiError != nil {
 			return nil, apiError
 		}
@@ -265,6 +302,8 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 		}
 		return emptyOrError(s.store.DeleteRoute(params.ID))
 	case "routes.activate":
+		s.vpnMu.Lock()
+		defer s.vpnMu.Unlock()
 		if apiError := s.requireStopped(); apiError != nil {
 			return nil, apiError
 		}
@@ -276,6 +315,8 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 		}
 		return emptyOrError(s.store.ActivateRoute(params.ID))
 	case "routes.app.set":
+		s.vpnMu.Lock()
+		defer s.vpnMu.Unlock()
 		if apiError := s.requireStopped(); apiError != nil {
 			return nil, apiError
 		}
@@ -288,6 +329,8 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 		}
 		return emptyOrError(s.store.SetAppRule(params.RouteID, params.App))
 	case "routes.app.remove":
+		s.vpnMu.Lock()
+		defer s.vpnMu.Unlock()
 		if apiError := s.requireStopped(); apiError != nil {
 			return nil, apiError
 		}
@@ -309,7 +352,15 @@ func (s *Server) status() map[string]any {
 	engineStatus := s.engine.Status()
 	connected := engineStatus.State == engine.StateConnected
 	status := map[string]any{
-		"apiVersion":      protocol.Version,
+		"apiVersion": protocol.Version,
+		"capabilities": []string{
+			"vpn.toggle",
+			"subscriptions",
+			"servers",
+			"routes.processPath",
+			"apps.desktop",
+		},
+		"enabled":         snapshot.VPNEnabled,
 		"engine":          engineStatus.State,
 		"engineAvailable": engineStatus.Available,
 		"connected":       connected,
@@ -317,6 +368,27 @@ func (s *Server) status() map[string]any {
 		"activeRouteId":   snapshot.ActiveRouteID,
 		"activeServerId":  snapshot.ActiveServerID,
 		"socket":          s.socketPath,
+	}
+	for _, profile := range snapshot.Profiles {
+		for _, server := range profile.Servers {
+			if server.ID == snapshot.ActiveServerID {
+				status["activeServer"] = publicServer(server)
+				break
+			}
+		}
+	}
+	for _, route := range snapshot.RouteProfiles {
+		if route.ID == snapshot.ActiveRouteID {
+			status["activeRoute"] = routeSummaryView{
+				ID:              route.ID,
+				Name:            route.Name,
+				DefaultOutbound: route.DefaultOutbound,
+			}
+			break
+		}
+	}
+	if restoreErr := s.restoreError(); restoreErr != "" {
+		status["restoreError"] = restoreErr
 	}
 	if engineStatus.PID > 0 {
 		status["enginePid"] = engineStatus.PID
@@ -334,6 +406,88 @@ func (s *Server) status() map[string]any {
 		status["configuration"] = "ready"
 	}
 	return status
+}
+
+func (s *Server) setVPNEnabled(enabled bool) (any, *protocol.Error) {
+	s.vpnMu.Lock()
+	defer s.vpnMu.Unlock()
+	if enabled {
+		if _, err := config.Build(s.store.Snapshot()); err != nil {
+			return nil, &protocol.Error{
+				Code:    "configuration_incomplete",
+				Message: fmt.Sprintf("%s: %v", errVPNConfigurationIncomplete, err),
+			}
+		}
+	}
+	if err := s.store.SetVPNEnabled(enabled); err != nil {
+		return nil, &protocol.Error{Code: "state_failed", Message: err.Error()}
+	}
+	if err := s.reconcileVPN(enabled); err != nil {
+		code := "engine_stop_failed"
+		if enabled {
+			code = "engine_start_failed"
+			if errors.Is(err, errVPNConfigurationIncomplete) {
+				code = "configuration_incomplete"
+			}
+		}
+		return nil, &protocol.Error{Code: code, Message: err.Error()}
+	}
+	s.setRestoreError("")
+	return s.status(), nil
+}
+
+func (s *Server) restoreDesiredState() {
+	s.vpnMu.Lock()
+	defer s.vpnMu.Unlock()
+	enabled := s.store.Snapshot().VPNEnabled
+	if err := s.reconcileVPN(enabled); err != nil {
+		s.setRestoreError(err.Error())
+		fmt.Fprintf(os.Stderr, "regaliad: restore VPN state: %v\n", err)
+		return
+	}
+	s.setRestoreError("")
+}
+
+func (s *Server) setRestoreError(message string) {
+	s.restoreMu.Lock()
+	s.restoreErr = message
+	s.restoreMu.Unlock()
+}
+
+func (s *Server) restoreError() string {
+	s.restoreMu.RLock()
+	defer s.restoreMu.RUnlock()
+	return s.restoreErr
+}
+
+func (s *Server) reconcileVPN(enabled bool) error {
+	status := s.engine.Status()
+	if enabled {
+		switch status.State {
+		case engine.StateConnected, engine.StateStarting:
+			return nil
+		case engine.StateStopping:
+			return errors.New("VPN engine is stopping")
+		}
+		result, err := config.Build(s.store.Snapshot())
+		if err != nil {
+			return fmt.Errorf("%w: %v", errVPNConfigurationIncomplete, err)
+		}
+		if err := s.engine.Start(result.JSON); err != nil && !errors.Is(err, engine.ErrAlreadyRunning) {
+			return err
+		}
+		return nil
+	}
+	if status.State == engine.StateUnavailable || status.State == engine.StateStopped {
+		return nil
+	}
+	if status.State == engine.StateStopping {
+		return nil
+	}
+	if err := s.engine.Stop(); err != nil && !errors.Is(err, engine.ErrNotRunning) {
+		return err
+	}
+	return nil
 }
 
 func (s *Server) requireStopped() *protocol.Error {

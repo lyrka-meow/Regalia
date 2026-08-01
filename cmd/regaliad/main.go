@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/lyrka-meow/Regalia/internal/daemon"
 	"github.com/lyrka-meow/Regalia/internal/engine"
@@ -40,7 +43,9 @@ func main() {
 	default:
 		log.Fatalf("unknown engine mode %q: use systemd or process", *engineMode)
 	}
-	if err := daemon.NewWithEngine(*socketPath, store, controller).ListenAndServe(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := daemon.NewWithEngine(*socketPath, store, controller).ListenAndServeContext(ctx); err != nil {
 		log.Fatal(err)
 	}
 }

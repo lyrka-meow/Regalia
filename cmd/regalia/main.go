@@ -55,9 +55,9 @@ func (t *terminal) runCommand(arguments []string) error {
 	switch arguments[0] {
 	case "status":
 		return t.printMethod("status", nil)
-	case "connect":
+	case "connect", "enable":
 		return t.printMethod("vpn.connect", nil)
-	case "disconnect":
+	case "disconnect", "disable":
 		return t.printMethod("vpn.disconnect", nil)
 	case "apps":
 		return t.printMethod("apps.list", nil)
@@ -334,6 +334,8 @@ func (t *terminal) printStatus() {
 		Engine         string `json:"engine"`
 		EnginePID      int    `json:"enginePid"`
 		EngineError    string `json:"engineError"`
+		RestoreError   string `json:"restoreError"`
+		Enabled        bool   `json:"enabled"`
 		Connected      bool   `json:"connected"`
 		Tun            bool   `json:"tun"`
 		ActiveServerID string `json:"activeServerId"`
@@ -350,6 +352,7 @@ func (t *terminal) printStatus() {
 		fmt.Printf("  PID:    %d\n", status.EnginePID)
 	}
 	fmt.Printf("  VPN:    %s\n", onOff(status.Connected))
+	fmt.Printf("  Keep enabled: %s\n", onOff(status.Enabled))
 	fmt.Printf("  TUN:    %s\n", onOff(status.Tun))
 	fmt.Printf("  Config: %s\n", status.Configuration)
 	if status.ActiveServerID != "" {
@@ -360,6 +363,9 @@ func (t *terminal) printStatus() {
 	}
 	if status.EngineError != "" {
 		fmt.Printf("  Error:  %s\n", status.EngineError)
+	}
+	if status.RestoreError != "" {
+		fmt.Printf("  Restore: %s\n", status.RestoreError)
 	}
 }
 
@@ -424,6 +430,8 @@ func commandHelp() string {
   regalia status
   regalia connect
   regalia disconnect
+  regalia enable
+  regalia disable
   regalia profiles
   regalia profile add NAME URL
   regalia profile refresh PROFILE_ID

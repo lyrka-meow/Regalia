@@ -28,6 +28,7 @@ project's source tree or Git history.
 - generate a sing-box TUN configuration;
 - validate configurations with `sing-box check` before every connection;
 - start and stop sing-box through a capability-restricted systemd service;
+- remember whether VPN is enabled and restore it when the user service starts;
 - expose the state through a private per-user Unix socket.
 
 The engine controller reports `unavailable`, `stopped`, `starting`,
@@ -92,6 +93,8 @@ sing-box executable; packaging must install an official, root-owned binary at
 
 The API and trust boundaries are described in
 [`docs/architecture.md`](docs/architecture.md).
+The shell-facing methods and status fields are documented in
+[`docs/quickshell-api.md`](docs/quickshell-api.md).
 
 ## License
 
