@@ -22,7 +22,7 @@ DevicePolicy=closed
 DeviceAllow=/dev/net/tun rw
 PrivateTmp=yes
 ProtectSystem=strict
-ProtectHome=yes
+ProtectHome=tmpfs
 ProtectClock=yes
 ProtectControlGroups=yes
 ProtectKernelLogs=yes
@@ -38,6 +38,6 @@ SystemCallArchitectures=native
 UMask=0077
 
 ReadOnlyPaths=/usr/lib/regalia
-ReadWritePaths=/run/user/%i/regalia
+BindPaths=/run/user/%i/regalia
 StandardOutput=journal
 StandardError=journal
