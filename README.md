@@ -24,8 +24,8 @@ project's source tree or Git history.
   SOCKS, HTTP, and JSON server formats;
 - keep the previous valid server list when a subscription refresh fails;
 - select a connection-ready server;
-- discover installed Linux applications from `.desktop` files and resolve
-  their executable paths;
+- discover installed Linux applications from `.desktop` files, resolve launcher
+  wrappers to the executable paths seen by sing-box, and migrate saved rules;
 - persist route profiles with `proxy` or `direct` application rules;
 - generate a sing-box TUN configuration;
 - validate configurations with `sing-box check` before every connection;

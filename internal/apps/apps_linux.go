@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -18,6 +19,7 @@ type Application struct {
 
 func List() []Application {
 	seen := map[string]bool{}
+	running := runningProcessPaths()
 	var applications []Application
 	for _, directory := range applicationDirectories() {
 		entries, err := os.ReadDir(directory)
@@ -28,7 +30,7 @@ func List() []Application {
 			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".desktop") || seen[entry.Name()] {
 				continue
 			}
-			application, ok := parseDesktopFile(filepath.Join(directory, entry.Name()), entry.Name())
+			application, ok := parseDesktopFile(filepath.Join(directory, entry.Name()), entry.Name(), running)
 			if !ok {
 				continue
 			}
@@ -59,7 +61,7 @@ func applicationDirectories() []string {
 	return directories
 }
 
-func parseDesktopFile(path, desktopID string) (Application, bool) {
+func parseDesktopFile(path, desktopID string, running map[string]string) (Application, bool) {
 	file, err := os.Open(path)
 	if err != nil {
 		return Application{}, false
@@ -103,8 +105,20 @@ func parseDesktopFile(path, desktopID string) (Application, bool) {
 		DesktopID:   desktopID,
 		Name:        values["Name"],
 		Icon:        values["Icon"],
-		ProcessPath: executable,
+		ProcessPath: resolveProcessPath(executable, running),
 	}, true
+}
+
+// PathsByDesktopID returns the executable path sing-box will actually see for
+// every installed desktop application. Desktop launchers are often only small
+// wrappers (for example /usr/bin/chromium starts /usr/lib/chromium/chromium),
+// so using the Exec= path verbatim makes process_path routing silently miss.
+func PathsByDesktopID() map[string]string {
+	paths := map[string]string{}
+	for _, application := range List() {
+		paths[application.DesktopID] = application.ProcessPath
+	}
+	return paths
 }
 
 func firstExecToken(command string) string {
@@ -229,4 +243,95 @@ func resolveExecutable(command string) string {
 		return ""
 	}
 	return path
+}
+
+func resolveProcessPath(launcher string, running map[string]string) string {
+	if processPath := running[strings.ToLower(filepath.Base(launcher))]; processPath != "" && processPath != launcher {
+		return processPath
+	}
+	if processPath := packagedProcessPath(launcher); processPath != "" {
+		return processPath
+	}
+	return launcher
+}
+
+func runningProcessPaths() map[string]string {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return map[string]string{}
+	}
+	counts := map[string]map[string]int{}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if _, err := strconv.Atoi(entry.Name()); err != nil {
+			continue
+		}
+		processPath, err := os.Readlink(filepath.Join("/proc", entry.Name(), "exe"))
+		if err != nil {
+			continue
+		}
+		processPath = strings.TrimSuffix(processPath, " (deleted)")
+		if executableFile(processPath) {
+			base := strings.ToLower(filepath.Base(processPath))
+			if counts[base] == nil {
+				counts[base] = map[string]int{}
+			}
+			counts[base][processPath]++
+		}
+	}
+	paths := map[string]string{}
+	for base, candidates := range counts {
+		for processPath, count := range candidates {
+			best := paths[base]
+			if best == "" || count > candidates[best] || count == candidates[best] && processPath < best {
+				paths[base] = processPath
+			}
+		}
+	}
+	return paths
+}
+
+func packagedProcessPath(launcher string) string {
+	base := filepath.Base(launcher)
+	for _, root := range []string{
+		filepath.Join("/usr/lib", base),
+		filepath.Join("/usr/lib64", base),
+		filepath.Join("/opt", base),
+	} {
+		if processPath := matchingExecutable(root, base, 2); processPath != "" {
+			return processPath
+		}
+	}
+	return ""
+}
+
+func matchingExecutable(root, base string, depth int) string {
+	if depth < 0 {
+		return ""
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		candidate := filepath.Join(root, entry.Name())
+		if !entry.IsDir() && strings.EqualFold(entry.Name(), base) && executableFile(candidate) {
+			return candidate
+		}
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			if candidate := matchingExecutable(filepath.Join(root, entry.Name()), base, depth-1); candidate != "" {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+func executableFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0
 }

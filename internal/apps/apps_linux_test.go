@@ -1,6 +1,10 @@
 package apps
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestFirstExecToken(t *testing.T) {
 	tests := map[string]string{
@@ -28,5 +32,19 @@ func TestApplicationExecTokenSkipsLaunchWrappers(t *testing.T) {
 		if actual := applicationExecToken(input); actual != expected {
 			t.Errorf("applicationExecToken(%q) = %q, want %q", input, actual, expected)
 		}
+	}
+}
+
+func TestMatchingExecutableFindsCaseInsensitivePackagedBinary(t *testing.T) {
+	root := t.TempDir()
+	processPath := filepath.Join(root, "current", "Discord")
+	if err := os.MkdirAll(filepath.Dir(processPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(processPath, []byte("test"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if actual := matchingExecutable(root, "discord", 2); actual != processPath {
+		t.Fatalf("matchingExecutable() = %q, want %q", actual, processPath)
 	}
 }

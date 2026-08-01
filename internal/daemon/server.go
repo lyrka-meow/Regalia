@@ -463,6 +463,16 @@ func (s *Server) restoreError() string {
 func (s *Server) reconcileVPN(enabled bool) error {
 	status := s.engine.Status()
 	if enabled {
+		pathsChanged, err := s.store.ReconcileAppPaths(apps.PathsByDesktopID())
+		if err != nil {
+			return fmt.Errorf("refresh application process paths: %w", err)
+		}
+		if pathsChanged && engine.Active(status) {
+			if err := s.engine.Stop(); err != nil && !errors.Is(err, engine.ErrNotRunning) {
+				return fmt.Errorf("restart VPN after refreshing application process paths: %w", err)
+			}
+			status = s.engine.Status()
+		}
 		switch status.State {
 		case engine.StateConnected, engine.StateStarting:
 			return nil

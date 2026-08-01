@@ -35,6 +35,51 @@ func TestRouteRuleReplacesSameProcessPath(t *testing.T) {
 	}
 }
 
+func TestRouteRuleReplacesSameDesktopApplication(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	route, err := store.CreateRoute("Default", "proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAppRule(route.ID, AppRule{DesktopID: "chromium.desktop", ProcessPath: "/usr/bin/chromium", Outbound: "direct"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAppRule(route.ID, AppRule{DesktopID: "chromium.desktop", ProcessPath: "/usr/lib/chromium/chromium", Outbound: "direct"}); err != nil {
+		t.Fatal(err)
+	}
+	apps := store.Snapshot().RouteProfiles[0].Apps
+	if len(apps) != 1 || apps[0].ProcessPath != "/usr/lib/chromium/chromium" {
+		t.Fatalf("unexpected rules: %#v", apps)
+	}
+}
+
+func TestReconcileAppPathsMigratesExistingRule(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	route, err := store.CreateRoute("Default", "proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAppRule(route.ID, AppRule{DesktopID: "chromium.desktop", ProcessPath: "/usr/bin/chromium", Outbound: "direct"}); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := store.ReconcileAppPaths(map[string]string{"chromium.desktop": "/usr/lib/chromium/chromium"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("expected process path migration")
+	}
+	if actual := store.Snapshot().RouteProfiles[0].Apps[0].ProcessPath; actual != "/usr/lib/chromium/chromium" {
+		t.Fatalf("process path = %q", actual)
+	}
+}
+
 func TestStatePersists(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store, err := Open(path)
