@@ -18,6 +18,8 @@ project's source tree or Git history.
 ## Current capabilities
 
 - create, refresh, list, and delete subscription profiles;
+- automatically send the Throne-compatible `x-hwid`, `x-device-os`,
+  `x-ver-os`, and `x-device-model` headers when downloading subscriptions;
 - parse common VMess, VLESS, Trojan, Shadowsocks, AnyTLS, Hysteria2, TUIC,
   SOCKS, HTTP, and JSON server formats;
 - keep the previous valid server list when a subscription refresh fails;
@@ -85,6 +87,12 @@ By default, the API socket is
 `$XDG_CONFIG_HOME/regalia/state.json` or `~/.config/regalia/state.json`.
 The generated engine configuration and log live in the same private runtime
 directory and are created with mode `0600`.
+
+Subscription refreshes always send the local machine ID, operating-system
+name, kernel version, and distribution name in the compatibility headers used
+by device-bound subscription providers. This is automatic and intentionally
+has no desktop toggle, so a subscription behaves the same in the TUI and in a
+desktop shell.
 
 Arch packaging paths and the privilege boundary are documented in
 [`packaging/README.md`](packaging/README.md). The repository does not bundle a
