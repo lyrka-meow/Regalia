@@ -1,0 +1,43 @@
+[Unit]
+Description=Regalia VPN engine for UID %i
+Documentation=https://github.com/lyrka-meow/Regalia
+Wants=network-online.target
+After=network-online.target
+PartOf=user-%i.slice
+ConditionPathExists=/run/user/%i/regalia/engine.json
+
+[Service]
+Type=simple
+User=%i
+ExecStart=/usr/lib/regalia/regalia-engine -config /run/user/%i/regalia/engine.json -binary /usr/lib/regalia/sing-box -log /run/user/%i/regalia/engine.log
+KillSignal=SIGINT
+TimeoutStopSec=10s
+Restart=no
+
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+UMask=0077
+
+ReadOnlyPaths=/usr/lib/regalia
+ReadWritePaths=/run/user/%i/regalia
+StandardOutput=journal
+StandardError=journal

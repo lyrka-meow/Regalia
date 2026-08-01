@@ -7,6 +7,8 @@ The project consists of:
 
 - `regaliad` — a per-user daemon with a versioned JSON API over a Unix socket;
 - `regalia` — a numbered terminal interface and a non-interactive CLI;
+- `regalia-engine` — a validating wrapper for the capability-restricted TUN
+  service;
 - internal packages for subscriptions, server selection, application discovery,
   route profiles, persistent state, and sing-box configuration generation.
 
@@ -25,7 +27,7 @@ project's source tree or Git history.
 - persist route profiles with `proxy` or `direct` application rules;
 - generate a sing-box TUN configuration;
 - validate configurations with `sing-box check` before every connection;
-- start and stop the sing-box process with observable lifecycle states;
+- start and stop sing-box through a capability-restricted systemd service;
 - expose the state through a private per-user Unix socket.
 
 The engine controller reports `unavailable`, `stopped`, `starting`,
@@ -33,9 +35,13 @@ The engine controller reports `unavailable`, `stopped`, `starting`,
 after sing-box survives its startup window. Early failures and the tail of the
 private engine log are exposed through the status API.
 
-The final Arch packaging for restricted TUN privileges is still pending.
-Running `regaliad` as root is not the intended solution; it will use a narrow
-system service with only the capabilities required by the engine.
+`regaliad` and the shell remain ordinary user processes. Only the
+`regalia-engine@UID.service` instance receives `CAP_NET_ADMIN`, and it executes
+the engine as that same UID. A polkit rule permits a user to manage only the
+instance matching their own numeric UID. Before sing-box is started, the
+wrapper reads the private configuration once, validates the restricted Regalia
+schema, verifies the root-owned sing-box binary, and feeds those same bytes to
+both `sing-box check` and `sing-box run`.
 
 ## Build and test
 
@@ -45,12 +51,14 @@ Regalia currently uses only the Go standard library.
 go test ./...
 go build -o bin/regaliad ./cmd/regaliad
 go build -o bin/regalia ./cmd/regalia
+go build -o bin/regalia-engine ./cmd/regalia-engine
 ```
 
-Start the daemon:
+For development without TUN privileges, start the daemon in direct process
+mode:
 
 ```bash
-go run ./cmd/regaliad
+go run ./cmd/regaliad --engine-mode process --engine /path/to/sing-box
 ```
 
 Open the terminal interface in another terminal:
@@ -76,6 +84,11 @@ By default, the API socket is
 `$XDG_CONFIG_HOME/regalia/state.json` or `~/.config/regalia/state.json`.
 The generated engine configuration and log live in the same private runtime
 directory and are created with mode `0600`.
+
+Arch packaging paths and the privilege boundary are documented in
+[`packaging/README.md`](packaging/README.md). The repository does not bundle a
+sing-box executable; packaging must install an official, root-owned binary at
+`/usr/lib/regalia/sing-box`.
 
 The API and trust boundaries are described in
 [`docs/architecture.md`](docs/architecture.md).

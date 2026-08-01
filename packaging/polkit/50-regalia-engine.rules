@@ -1,0 +1,18 @@
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return polkit.Result.NOT_HANDLED;
+    }
+
+    var unit = action.lookup("unit");
+    var verb = action.lookup("verb");
+    var expectedUnit = "regalia-engine@" + subject.uid + ".service";
+    var allowedVerb = verb === "start" ||
+        verb === "stop" ||
+        verb === "reset-failed";
+
+    if (unit === expectedUnit && allowedVerb) {
+        return polkit.Result.YES;
+    }
+
+    return polkit.Result.NOT_HANDLED;
+});

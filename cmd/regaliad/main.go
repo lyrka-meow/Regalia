@@ -14,9 +14,11 @@ import (
 
 func main() {
 	socketPath := flag.String("socket", paths.Socket(), "Unix socket path")
-	engineBinary := flag.String("engine", "sing-box", "sing-box executable path")
+	engineMode := flag.String("engine-mode", "systemd", "engine controller: systemd or process")
+	engineBinary := flag.String("engine", "/usr/lib/regalia/sing-box", "sing-box executable path")
 	engineConfig := flag.String("engine-config", paths.EngineConfig(), "temporary sing-box configuration path")
 	engineLog := flag.String("engine-log", paths.EngineLog(), "sing-box log path")
+	engineUnit := flag.String("engine-unit", fmt.Sprintf("regalia-engine@%d.service", os.Getuid()), "systemd engine unit")
 	statePath, err := paths.State()
 	if err != nil {
 		log.Fatal(err)
@@ -29,7 +31,15 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Fprintf(os.Stderr, "regaliad: listening on %s\n", *socketPath)
-	controller := engine.NewProcess(*engineBinary, *engineConfig, *engineLog)
+	var controller engine.Controller
+	switch *engineMode {
+	case "systemd":
+		controller = engine.NewSystemd(*engineBinary, *engineConfig, *engineLog, *engineUnit)
+	case "process":
+		controller = engine.NewProcess(*engineBinary, *engineConfig, *engineLog)
+	default:
+		log.Fatalf("unknown engine mode %q: use systemd or process", *engineMode)
+	}
 	if err := daemon.NewWithEngine(*socketPath, store, controller).ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}

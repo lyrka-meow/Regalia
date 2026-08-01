@@ -75,7 +75,7 @@ func (p *Process) Start(configuration []byte) error {
 	if err := writePrivateFile(p.configPath, configuration); err != nil {
 		return p.fail(fmt.Errorf("write engine configuration: %w", err))
 	}
-	if err := p.checkConfiguration(binary); err != nil {
+	if err := checkConfiguration(binary, p.configPath); err != nil {
 		return p.fail(err)
 	}
 	if err := ensurePrivateDirectory(filepath.Dir(p.logPath)); err != nil {
@@ -177,10 +177,10 @@ func (p *Process) Stop() error {
 	}
 }
 
-func (p *Process) checkConfiguration(binary string) error {
+func checkConfiguration(binary, configPath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, binary, "check", "--disable-color", "-c", p.configPath)
+	command := exec.CommandContext(ctx, binary, "check", "--disable-color", "-c", configPath)
 	output, err := command.CombinedOutput()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return errors.New("sing-box configuration check timed out")
