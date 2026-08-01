@@ -55,6 +55,10 @@ func (t *terminal) runCommand(arguments []string) error {
 	switch arguments[0] {
 	case "status":
 		return t.printMethod("status", nil)
+	case "connect":
+		return t.printMethod("vpn.connect", nil)
+	case "disconnect":
+		return t.printMethod("vpn.disconnect", nil)
 	case "apps":
 		return t.printMethod("apps.list", nil)
 	case "profiles":
@@ -128,25 +132,31 @@ func (t *terminal) runTUI() {
 	for {
 		clear()
 		fmt.Println("╭────────────────────────────────╮")
-		fmt.Println("│             REGALIA              │")
+		fmt.Println("│            REGALIA             │")
 		fmt.Println("│   local VPN control center     │")
 		fmt.Println("╰────────────────────────────────╯")
 		fmt.Println()
 		t.printStatus()
 		fmt.Println()
-		fmt.Println("  1) Subscription profiles")
-		fmt.Println("  2) Servers")
-		fmt.Println("  3) Route profiles")
-		fmt.Println("  4) Installed applications")
+		fmt.Println("  1) Connect VPN")
+		fmt.Println("  2) Disconnect VPN")
+		fmt.Println("  3) Subscription profiles")
+		fmt.Println("  4) Servers")
+		fmt.Println("  5) Route profiles")
+		fmt.Println("  6) Installed applications")
 		fmt.Println("  0) Exit")
 		switch t.ask("\nChoice") {
 		case "1":
-			t.profilesMenu()
+			t.showAndWait("vpn.connect", nil)
 		case "2":
-			t.serversMenu()
+			t.showAndWait("vpn.disconnect", nil)
 		case "3":
-			t.showAndWait("routes.list", nil)
+			t.profilesMenu()
 		case "4":
+			t.serversMenu()
+		case "5":
+			t.showAndWait("routes.list", nil)
+		case "6":
 			t.showAndWait("apps.list", nil)
 		case "0":
 			return
@@ -322,6 +332,8 @@ func (t *terminal) printStatus() {
 	}
 	var status struct {
 		Engine         string `json:"engine"`
+		EnginePID      int    `json:"enginePid"`
+		EngineError    string `json:"engineError"`
 		Connected      bool   `json:"connected"`
 		Tun            bool   `json:"tun"`
 		ActiveServerID string `json:"activeServerId"`
@@ -334,6 +346,9 @@ func (t *terminal) printStatus() {
 	}
 	fmt.Println("  Daemon: online")
 	fmt.Printf("  Engine: %s\n", status.Engine)
+	if status.EnginePID > 0 {
+		fmt.Printf("  PID:    %d\n", status.EnginePID)
+	}
 	fmt.Printf("  VPN:    %s\n", onOff(status.Connected))
 	fmt.Printf("  TUN:    %s\n", onOff(status.Tun))
 	fmt.Printf("  Config: %s\n", status.Configuration)
@@ -342,6 +357,9 @@ func (t *terminal) printStatus() {
 	}
 	if status.ConfigError != "" {
 		fmt.Printf("  Note:   %s\n", status.ConfigError)
+	}
+	if status.EngineError != "" {
+		fmt.Printf("  Error:  %s\n", status.EngineError)
 	}
 }
 
@@ -404,6 +422,8 @@ func onOff(value bool) string {
 func commandHelp() string {
 	return `commands:
   regalia status
+  regalia connect
+  regalia disconnect
   regalia profiles
   regalia profile add NAME URL
   regalia profile refresh PROFILE_ID

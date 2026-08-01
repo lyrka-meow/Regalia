@@ -7,10 +7,22 @@ import (
 )
 
 func Socket() string {
+	return filepath.Join(RuntimeDirectory(), "regaliad.sock")
+}
+
+func EngineConfig() string {
+	return filepath.Join(RuntimeDirectory(), "engine.json")
+}
+
+func EngineLog() string {
+	return filepath.Join(RuntimeDirectory(), "engine.log")
+}
+
+func RuntimeDirectory() string {
 	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir != "" {
-		return filepath.Join(runtimeDir, "regalia", "regaliad.sock")
+		return filepath.Join(runtimeDir, "regalia")
 	}
-	return filepath.Join(os.TempDir(), fmt.Sprintf("regalia-%d", os.Getuid()), "regaliad.sock")
+	return filepath.Join(os.TempDir(), fmt.Sprintf("regalia-%d", os.Getuid()))
 }
 
 func State() (string, error) {

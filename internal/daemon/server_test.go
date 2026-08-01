@@ -9,8 +9,33 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lyrka-meow/Regalia/internal/engine"
 	"github.com/lyrka-meow/Regalia/internal/state"
 )
+
+type fakeEngine struct {
+	status        engine.Status
+	configuration []byte
+	starts        int
+	stops         int
+}
+
+func (f *fakeEngine) Status() engine.Status {
+	return f.status
+}
+
+func (f *fakeEngine) Start(configuration []byte) error {
+	f.starts++
+	f.configuration = append([]byte(nil), configuration...)
+	f.status = engine.Status{State: engine.StateConnected, Available: true, PID: 4242}
+	return nil
+}
+
+func (f *fakeEngine) Stop() error {
+	f.stops++
+	f.status = engine.Status{State: engine.StateStopped, Available: true}
+	return nil
+}
 
 func TestSubscriptionRefreshAndServerSelection(t *testing.T) {
 	subscriptionBody := base64.StdEncoding.EncodeToString([]byte(
@@ -99,6 +124,66 @@ func TestFailedRefreshKeepsOldServers(t *testing.T) {
 	}
 	if snapshot.Profiles[0].LastError == "" {
 		t.Fatal("failed refresh was not recorded")
+	}
+}
+
+func TestVPNLifecycleAndConfigurationLock(t *testing.T) {
+	subscriptionServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		_, _ = response.Write([]byte("trojan://secret@vpn.example:443#Warsaw"))
+	}))
+	defer subscriptionServer.Close()
+
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeEngine{status: engine.Status{State: engine.StateStopped, Available: true}}
+	server := NewWithEngine(filepath.Join(t.TempDir(), "regaliad.sock"), store, controller)
+
+	if _, apiError := server.dispatch("vpn.connect", nil); apiError == nil || apiError.Code != "configuration_incomplete" {
+		t.Fatalf("connect without a server returned %#v", apiError)
+	}
+	if controller.starts != 0 {
+		t.Fatal("engine started with incomplete configuration")
+	}
+
+	profile, err := store.CreateProfile("Main", subscriptionServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, apiError := server.dispatch("profiles.refresh", params(t, map[string]string{"id": profile.ID})); apiError != nil {
+		t.Fatal(apiError)
+	}
+	serverID := store.Snapshot().Profiles[0].Servers[0].ID
+	if _, apiError := server.dispatch("servers.select", params(t, map[string]string{"id": serverID})); apiError != nil {
+		t.Fatal(apiError)
+	}
+
+	result, apiError := server.dispatch("vpn.connect", nil)
+	if apiError != nil {
+		t.Fatal(apiError)
+	}
+	if controller.starts != 1 || !json.Valid(controller.configuration) || !strings.Contains(string(controller.configuration), `"type":"tun"`) {
+		t.Fatalf("engine received invalid configuration: %s", controller.configuration)
+	}
+	status := result.(map[string]any)
+	if status["apiVersion"] != 2 || status["engine"] != engine.StateConnected || status["connected"] != true || status["enginePid"] != 4242 {
+		t.Fatalf("unexpected connected status: %#v", status)
+	}
+	if _, apiError := server.dispatch("servers.select", params(t, map[string]string{"id": serverID})); apiError == nil || apiError.Code != "vpn_active" {
+		t.Fatalf("active configuration mutation returned %#v", apiError)
+	}
+
+	result, apiError = server.dispatch("vpn.disconnect", nil)
+	if apiError != nil {
+		t.Fatal(apiError)
+	}
+	if controller.stops != 1 {
+		t.Fatalf("engine stop count is %d, want 1", controller.stops)
+	}
+	status = result.(map[string]any)
+	if status["engine"] != engine.StateStopped || status["connected"] != false {
+		t.Fatalf("unexpected disconnected status: %#v", status)
 	}
 }
 

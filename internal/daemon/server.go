@@ -12,6 +12,7 @@ import (
 
 	"github.com/lyrka-meow/Regalia/internal/apps"
 	"github.com/lyrka-meow/Regalia/internal/config"
+	"github.com/lyrka-meow/Regalia/internal/engine"
 	"github.com/lyrka-meow/Regalia/internal/protocol"
 	"github.com/lyrka-meow/Regalia/internal/state"
 	"github.com/lyrka-meow/Regalia/internal/subscription"
@@ -21,6 +22,7 @@ type Server struct {
 	socketPath string
 	store      *state.Store
 	fetcher    *subscription.Fetcher
+	engine     engine.Controller
 }
 
 type profileView struct {
@@ -42,16 +44,33 @@ type serverView struct {
 }
 
 func New(socketPath string, store *state.Store) *Server {
+	return NewWithEngine(socketPath, store, engine.NewUnavailable("VPN engine controller is not configured"))
+}
+
+func NewWithEngine(socketPath string, store *state.Store, controller engine.Controller) *Server {
+	if controller == nil {
+		controller = engine.NewUnavailable("VPN engine controller is not configured")
+	}
 	return &Server{
 		socketPath: socketPath,
 		store:      store,
 		fetcher:    subscription.NewFetcher(),
+		engine:     controller,
 	}
 }
 
 func (s *Server) ListenAndServe() error {
-	if err := os.MkdirAll(filepath.Dir(s.socketPath), 0o700); err != nil {
+	defer func() {
+		if engine.Active(s.engine.Status()) {
+			_ = s.engine.Stop()
+		}
+	}()
+	socketDirectory := filepath.Dir(s.socketPath)
+	if err := os.MkdirAll(socketDirectory, 0o700); err != nil {
 		return fmt.Errorf("create socket directory: %w", err)
+	}
+	if err := os.Chmod(socketDirectory, 0o700); err != nil {
+		return fmt.Errorf("protect socket directory: %w", err)
 	}
 	if err := removeStaleSocket(s.socketPath); err != nil {
 		return err
@@ -99,23 +118,21 @@ func (s *Server) handle(request protocol.Request) protocol.Response {
 func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Error) {
 	switch method {
 	case "status":
-		snapshot := s.store.Snapshot()
-		status := map[string]any{
-			"apiVersion":     protocol.Version,
-			"engine":         "unavailable",
-			"connected":      false,
-			"tun":            false,
-			"activeRouteId":  snapshot.ActiveRouteID,
-			"activeServerId": snapshot.ActiveServerID,
-			"socket":         s.socketPath,
+		return s.status(), nil
+	case "vpn.connect":
+		result, err := config.Build(s.store.Snapshot())
+		if err != nil {
+			return nil, &protocol.Error{Code: "configuration_incomplete", Message: err.Error()}
 		}
-		if _, err := config.Build(snapshot); err != nil {
-			status["configuration"] = "incomplete"
-			status["configurationError"] = err.Error()
-		} else {
-			status["configuration"] = "ready"
+		if err := s.engine.Start(result.JSON); err != nil {
+			return nil, &protocol.Error{Code: "engine_start_failed", Message: err.Error()}
 		}
-		return status, nil
+		return s.status(), nil
+	case "vpn.disconnect":
+		if err := s.engine.Stop(); err != nil && !errors.Is(err, engine.ErrNotRunning) {
+			return nil, &protocol.Error{Code: "engine_stop_failed", Message: err.Error()}
+		}
+		return s.status(), nil
 	case "apps.list":
 		return apps.List(), nil
 	case "profiles.list":
@@ -139,6 +156,9 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 		}
 		return publicProfile(profile), nil
 	case "profiles.delete":
+		if apiError := s.requireStopped(); apiError != nil {
+			return nil, apiError
+		}
 		var params struct {
 			ID string `json:"id"`
 		}
@@ -147,6 +167,9 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 		}
 		return emptyOrError(s.store.DeleteProfile(params.ID))
 	case "profiles.refresh":
+		if apiError := s.requireStopped(); apiError != nil {
+			return nil, apiError
+		}
 		var params struct {
 			ID string `json:"id"`
 		}
@@ -194,6 +217,9 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 			"profiles":       groups,
 		}, nil
 	case "servers.select":
+		if apiError := s.requireStopped(); apiError != nil {
+			return nil, apiError
+		}
 		var params struct {
 			ID string `json:"id"`
 		}
@@ -215,6 +241,9 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 			"items":         snapshot.RouteProfiles,
 		}, nil
 	case "routes.create":
+		if apiError := s.requireStopped(); apiError != nil {
+			return nil, apiError
+		}
 		var params struct {
 			Name            string `json:"name"`
 			DefaultOutbound string `json:"defaultOutbound"`
@@ -225,6 +254,9 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 		route, err := s.store.CreateRoute(params.Name, params.DefaultOutbound)
 		return resultOrError(route, err)
 	case "routes.delete":
+		if apiError := s.requireStopped(); apiError != nil {
+			return nil, apiError
+		}
 		var params struct {
 			ID string `json:"id"`
 		}
@@ -233,6 +265,9 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 		}
 		return emptyOrError(s.store.DeleteRoute(params.ID))
 	case "routes.activate":
+		if apiError := s.requireStopped(); apiError != nil {
+			return nil, apiError
+		}
 		var params struct {
 			ID string `json:"id"`
 		}
@@ -241,6 +276,9 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 		}
 		return emptyOrError(s.store.ActivateRoute(params.ID))
 	case "routes.app.set":
+		if apiError := s.requireStopped(); apiError != nil {
+			return nil, apiError
+		}
 		var params struct {
 			RouteID string        `json:"routeId"`
 			App     state.AppRule `json:"app"`
@@ -250,6 +288,9 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 		}
 		return emptyOrError(s.store.SetAppRule(params.RouteID, params.App))
 	case "routes.app.remove":
+		if apiError := s.requireStopped(); apiError != nil {
+			return nil, apiError
+		}
 		var params struct {
 			RouteID     string `json:"routeId"`
 			ProcessPath string `json:"processPath"`
@@ -261,6 +302,49 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 	default:
 		return nil, &protocol.Error{Code: "method_not_found", Message: "unknown method: " + method}
 	}
+}
+
+func (s *Server) status() map[string]any {
+	snapshot := s.store.Snapshot()
+	engineStatus := s.engine.Status()
+	connected := engineStatus.State == engine.StateConnected
+	status := map[string]any{
+		"apiVersion":      protocol.Version,
+		"engine":          engineStatus.State,
+		"engineAvailable": engineStatus.Available,
+		"connected":       connected,
+		"tun":             connected,
+		"activeRouteId":   snapshot.ActiveRouteID,
+		"activeServerId":  snapshot.ActiveServerID,
+		"socket":          s.socketPath,
+	}
+	if engineStatus.PID > 0 {
+		status["enginePid"] = engineStatus.PID
+	}
+	if engineStatus.StartedAt != "" {
+		status["engineStartedAt"] = engineStatus.StartedAt
+	}
+	if engineStatus.Error != "" {
+		status["engineError"] = engineStatus.Error
+	}
+	if _, err := config.Build(snapshot); err != nil {
+		status["configuration"] = "incomplete"
+		status["configurationError"] = err.Error()
+	} else {
+		status["configuration"] = "ready"
+	}
+	return status
+}
+
+func (s *Server) requireStopped() *protocol.Error {
+	status := s.engine.Status()
+	if engine.Active(status) {
+		return &protocol.Error{
+			Code:    "vpn_active",
+			Message: "disconnect the VPN before changing its active configuration",
+		}
+	}
+	return nil
 }
 
 func decodeParams(raw json.RawMessage, destination any) error {

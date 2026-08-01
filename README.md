@@ -24,11 +24,18 @@ project's source tree or Git history.
   their executable paths;
 - persist route profiles with `proxy` or `direct` application rules;
 - generate a sing-box TUN configuration;
+- validate configurations with `sing-box check` before every connection;
+- start and stop the sing-box process with observable lifecycle states;
 - expose the state through a private per-user Unix socket.
 
-The engine lifecycle is not connected yet. Regalia can prepare and validate its
-state and generated configuration, but it deliberately reports the VPN engine
-as unavailable instead of claiming that a tunnel is active.
+The engine controller reports `unavailable`, `stopped`, `starting`,
+`connected`, `stopping`, or `failed`. A connection is reported as active only
+after sing-box survives its startup window. Early failures and the tail of the
+private engine log are exposed through the status API.
+
+The final Arch packaging for restricted TUN privileges is still pending.
+Running `regaliad` as root is not the intended solution; it will use a narrow
+system service with only the capabilities required by the engine.
 
 ## Build and test
 
@@ -56,6 +63,8 @@ Non-interactive examples:
 
 ```bash
 go run ./cmd/regalia status
+go run ./cmd/regalia connect
+go run ./cmd/regalia disconnect
 go run ./cmd/regalia apps
 go run ./cmd/regalia profile add Main https://example.com/subscription
 go run ./cmd/regalia profiles
@@ -65,6 +74,8 @@ go run ./cmd/regalia servers
 By default, the API socket is
 `$XDG_RUNTIME_DIR/regalia/regaliad.sock`, and persistent state is stored in
 `$XDG_CONFIG_HOME/regalia/state.json` or `~/.config/regalia/state.json`.
+The generated engine configuration and log live in the same private runtime
+directory and are created with mode `0600`.
 
 The API and trust boundaries are described in
 [`docs/architecture.md`](docs/architecture.md).
