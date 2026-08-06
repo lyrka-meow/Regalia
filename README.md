@@ -32,6 +32,11 @@ next time its VPN settings page is opened.
 The installer currently supports Arch Linux on `x86_64` and `aarch64`. Do not
 run it through `sudo`; it requests elevated access only for system files.
 
+MacqueenDE can run the same installer without a terminal by selecting the
+binary or source option on its VPN settings page. In that mode, the regular
+graphical polkit authentication dialog is used. Regalia can also be removed
+from that page; removal keeps the user's subscriptions and routing profiles.
+
 ## Current capabilities
 
 - create, refresh, list, and delete subscription profiles;

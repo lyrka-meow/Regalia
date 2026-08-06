@@ -5,6 +5,7 @@ set -euo pipefail
 repo=${REGALIA_GITHUB_REPO:-lyrka-meow/Regalia}
 release_tag=${REGALIA_RELEASE_TAG:-rolling}
 requested_mode=${REGALIA_INSTALL_MODE:-}
+privilege_mode=${REGALIA_PRIVILEGE_MODE:-sudo}
 sing_box_version=${REGALIA_SING_BOX_VERSION:-1.13.15}
 install_mode=
 arch=$(uname -m)
@@ -34,6 +35,15 @@ command -v pacman >/dev/null 2>&1 || {
 [[ -n "$requested_mode" || -r /dev/tty ]] || {
     echo "The installer needs a terminal. Set REGALIA_INSTALL_MODE if running non-interactively." >&2
     exit 1
+}
+
+as_root()
+{
+    case "$privilege_mode" in
+        pkexec) pkexec "$@" ;;
+        sudo) sudo "$@" ;;
+        *) echo "Unsupported privilege mode: $privilege_mode" >&2; return 1 ;;
+    esac
 }
 
 if [[ -t 1 ]]; then
@@ -176,6 +186,14 @@ download_sing_box()
     printf '%s\n' "$extracted" >"$tmp_dir/sing-box-path"
 }
 
+download_payload_installer()
+{
+    local url
+    url="https://raw.githubusercontent.com/$repo/main/installer/install-release-payload.sh"
+    curl -fsSL --retry 3 "$url" -o "$tmp_dir/install-release-payload.sh"
+    chmod 0755 "$tmp_dir/install-release-payload.sh"
+}
+
 resolve_binary()
 {
     local api asset_url asset_name suffix version
@@ -221,7 +239,10 @@ install_binary()
     mkdir -p "$tmp_dir/release"
     tar --zstd -xf "$archive" -C "$tmp_dir/release"
     sing_box=$(<"$tmp_dir/sing-box-path")
-    REGALIA_SING_BOX_BINARY="$sing_box" "$tmp_dir/release/install.sh"
+    REGALIA_PRIVILEGE_MODE="$privilege_mode" \
+        REGALIA_PAYLOAD_ROOT="$tmp_dir/release/payload" \
+        REGALIA_SING_BOX_BINARY="$sing_box" \
+        "$tmp_dir/install-release-payload.sh"
     printf '%s\n' "$version" >"$tmp_dir/installed-version"
 }
 
@@ -235,7 +256,10 @@ install_source()
     mkdir -p "$tmp_dir/release"
     tar --zstd -xf "$archive" -C "$tmp_dir/release"
     sing_box=$(<"$tmp_dir/sing-box-path")
-    REGALIA_SING_BOX_BINARY="$sing_box" "$tmp_dir/release/install.sh"
+    REGALIA_PRIVILEGE_MODE="$privilege_mode" \
+        REGALIA_PAYLOAD_ROOT="$tmp_dir/release/payload" \
+        REGALIA_SING_BOX_BINARY="$sing_box" \
+        "$source_dir/installer/install-release-payload.sh"
     printf 'source-%s\n' "$commit" >"$tmp_dir/installed-version"
 }
 
@@ -245,15 +269,18 @@ main()
     choose_mode
 
     printf '\nЖурнал установки: %s\n' "$log_file"
-    printf 'Для системных файлов потребуется пароль sudo.\n\n'
-    sudo -n true 2>/dev/null || sudo -v
+    printf 'Для системных файлов потребуется подтверждение прав администратора.\n\n'
+    if [[ "$privilege_mode" == sudo ]]; then
+        sudo -n true 2>/dev/null || sudo -v
+    fi
     run_step 'Установка системных зависимостей' \
-        sudo pacman -S --needed --noconfirm curl polkit
+        as_root pacman -S --needed --noconfirm curl polkit
     if [[ "$install_mode" == source ]]; then
         run_step 'Установка инструментов сборки' \
-            sudo pacman -S --needed --noconfirm git go
+            as_root pacman -S --needed --noconfirm git go
     fi
     run_step "Загрузка и проверка sing-box $sing_box_version" download_sing_box
+    run_step 'Загрузка установочного компонента' download_payload_installer
     case "$install_mode" in
         binary) run_step 'Установка готовой Regalia' install_binary ;;
         source) run_step 'Сборка и установка Regalia' install_source ;;
@@ -271,4 +298,3 @@ main()
 }
 
 main "$@"
-
