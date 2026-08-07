@@ -75,6 +75,34 @@ func TestGeneratedNetcheckConfigurationPassesSingBoxCheck(t *testing.T) {
 	}
 }
 
+func TestNetcheckDirectRouteUsesWorkingResolver(t *testing.T) {
+	result, err := BuildWithOptions(readySnapshot(), NetcheckOptions{
+		Port: 43123, DirectUser: "direct", DirectPassword: "direct-secret",
+		ProxyUser: "proxy", ProxyPassword: "proxy-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(result.JSON, &document); err != nil {
+		t.Fatal(err)
+	}
+	route := document["route"].(map[string]any)
+	rules := route["rules"].([]any)
+	resolveRule := rules[0].(map[string]any)
+	if resolveRule["inbound"] != "regalia-netcheck" ||
+		resolveRule["auth_user"] != "direct" ||
+		resolveRule["action"] != "resolve" ||
+		resolveRule["server"] != "dns-remote" ||
+		resolveRule["strategy"] != "prefer_ipv4" {
+		t.Fatalf("unexpected direct netcheck resolver rule: %#v", resolveRule)
+	}
+	directRule := rules[1].(map[string]any)
+	if directRule["action"] != "route" || directRule["outbound"] != "direct" {
+		t.Fatalf("unexpected direct netcheck route: %#v", directRule)
+	}
+}
+
 func readySnapshot() state.State {
 	outbound := json.RawMessage(`{
 		"type":"trojan",

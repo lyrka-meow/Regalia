@@ -205,6 +205,13 @@ func buildRoute(profile *state.RouteProfile, netcheck NetcheckOptions) map[strin
 			map[string]any{
 				"inbound":   "regalia-netcheck",
 				"auth_user": netcheck.DirectUser,
+				"action":    "resolve",
+				"server":    "dns-remote",
+				"strategy":  "prefer_ipv4",
+			},
+			map[string]any{
+				"inbound":   "regalia-netcheck",
+				"auth_user": netcheck.DirectUser,
 				"action":    "route",
 				"outbound":  "direct",
 			},

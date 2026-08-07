@@ -205,12 +205,13 @@ func validateRoute(value any, expectNetcheck bool) error {
 	}
 	sniffIndex := 0
 	if expectNetcheck {
-		if len(rules) < 4 {
-			return errors.New("netcheck inbound requires direct and proxy route rules")
+		if len(rules) < 5 {
+			return errors.New("netcheck inbound requires resolver, direct and proxy route rules")
 		}
-		sniffIndex = 2
+		sniffIndex = 3
 	}
 	netcheckUsers := map[string]bool{}
+	netcheckDirectUser := ""
 	for index, value := range rules {
 		rule, ok := value.(map[string]any)
 		if !ok {
@@ -218,6 +219,18 @@ func validateRoute(value any, expectNetcheck bool) error {
 		}
 		action := stringValue(rule["action"])
 		switch action {
+		case "resolve":
+			user := stringValue(rule["auth_user"])
+			if !expectNetcheck || index != 0 || stringValue(rule["inbound"]) != "regalia-netcheck" || user == "" {
+				return errors.New("invalid netcheck resolver rule")
+			}
+			if stringValue(rule["server"]) != "dns-remote" || stringValue(rule["strategy"]) != "prefer_ipv4" {
+				return errors.New("netcheck resolver must use the remote IPv4 resolver")
+			}
+			if err := onlyKeys(rule, "inbound", "auth_user", "action", "server", "strategy"); err != nil {
+				return fmt.Errorf("netcheck resolver rule: %w", err)
+			}
+			netcheckDirectUser = user
 		case "sniff":
 			if index != sniffIndex || len(rule) != 1 {
 				return errors.New("sniff must be the first plain rule")
@@ -236,10 +249,10 @@ func validateRoute(value any, expectNetcheck bool) error {
 			}
 			if inbound := stringValue(rule["inbound"]); inbound != "" {
 				user := stringValue(rule["auth_user"])
-				if !expectNetcheck || index >= 2 || inbound != "regalia-netcheck" || user == "" || netcheckUsers[user] {
+				if !expectNetcheck || index < 1 || index >= 3 || inbound != "regalia-netcheck" || user == "" || netcheckUsers[user] {
 					return errors.New("invalid netcheck route rule")
 				}
-				if (index == 0 && outbound != "direct") || (index == 1 && outbound != "proxy") {
+				if (index == 1 && (outbound != "direct" || user != netcheckDirectUser)) || (index == 2 && outbound != "proxy") {
 					return errors.New("netcheck rules must route direct before proxy")
 				}
 				if err := onlyKeys(rule, "inbound", "auth_user", "action", "outbound"); err != nil {
