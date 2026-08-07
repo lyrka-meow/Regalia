@@ -4,7 +4,7 @@
 
 ### `regaliad`
 
-`regaliad` owns persistent VPN state and exposes API version 4 over a local Unix
+`regaliad` owns persistent VPN state and exposes API version 5 over a local Unix
 socket. The socket directory is private to the current user, and the socket is
 created with mode `0600`.
 
@@ -16,6 +16,7 @@ The daemon currently handles:
 - application discovery and per-executable routing rules;
 - validation and generation of a sing-box TUN configuration;
 - systemd-backed sing-box lifecycle and failure reporting.
+- bounded, on-demand direct/VPN connection-quality tests.
 
 ### `regalia`
 
@@ -45,10 +46,10 @@ Request:
 Response:
 
 ```json
-{"id":1,"result":{"apiVersion":4}}
+{"id":1,"result":{"apiVersion":5}}
 ```
 
-API version 4 currently exposes:
+API version 5 currently exposes:
 
 - `status`
 - `vpn.connect`
@@ -68,6 +69,11 @@ API version 4 currently exposes:
 - `routes.activate`
 - `routes.app.set`
 - `routes.app.remove`
+- `network.test.start`
+- `network.test.status`
+- `network.test.cancel`
+- `network.test.history`
+- `network.test.history.clear`
 
 ## Routing model
 
@@ -87,6 +93,13 @@ user process and retains `NoNewPrivileges` and namespace restrictions.
 
 Only the local user can access the API and state. The UI-facing daemon remains
 unprivileged and delegates only TUN startup and shutdown to the engine bridge.
+
+Connection comparison uses one authenticated `mixed` inbound bound only to
+`127.0.0.1`. Two random per-daemon credentials map test requests explicitly to
+the existing `direct` and `proxy` outbounds. These rules are placed before the
+ordinary application rules, so testing never rewrites or toggles another
+application's route. Credentials remain only in the private runtime config and
+are never returned by the API.
 
 ## Engine lifecycle
 
@@ -110,7 +123,7 @@ The system service runs as the same numeric desktop UID and receives only
 4. reads the configuration once and passes the same bytes over standard input
    to both `sing-box check` and `sing-box run`;
 5. opens the private engine log itself after systemd has dropped to the target
-   UID, without following symbolic links.
+   UID, without following symbolic links, and caps it at 1 MiB.
 
 The systemd sandbox blocks home-directory access, filesystem writes outside
 the private runtime directory, device access other than `/dev/net/tun`, extra
@@ -134,5 +147,5 @@ direct child for isolated development and tests. It does not grant TUN
 privileges and is not the packaged production mode.
 
 The next implementation boundary is event streaming and the native QuickShell
-client module. API version 4 can already be integrated through its private
-socket with short status polling.
+client module. API version 5 can be integrated through its private socket with
+short status polling while an operation is active.

@@ -16,7 +16,24 @@ type Result struct {
 	Route       *state.RouteProfile
 }
 
+type NetcheckOptions struct {
+	Port           int
+	DirectUser     string
+	DirectPassword string
+	ProxyUser      string
+	ProxyPassword  string
+}
+
+func (options NetcheckOptions) Enabled() bool {
+	return options.Port > 0 && options.DirectUser != "" && options.DirectPassword != "" &&
+		options.ProxyUser != "" && options.ProxyPassword != ""
+}
+
 func Build(snapshot state.State) (Result, error) {
+	return BuildWithOptions(snapshot, NetcheckOptions{})
+}
+
+func BuildWithOptions(snapshot state.State, netcheck NetcheckOptions) (Result, error) {
 	server, err := activeServer(snapshot)
 	if err != nil {
 		return Result{}, err
@@ -37,8 +54,42 @@ func Build(snapshot state.State) (Result, error) {
 	}
 
 	routeProfile := activeRoute(snapshot)
-	route := buildRoute(routeProfile)
+	route := buildRoute(routeProfile, netcheck)
 	tunCIDR := "172.19.0.1/30"
+	inbounds := []any{
+		map[string]any{
+			"type":           "tun",
+			"tag":            "tun-in",
+			"interface_name": "regalia0",
+			"address":        []string{tunCIDR},
+			"auto_route":     true,
+			"auto_redirect":  true,
+			"strict_route":   true,
+			"stack":          "system",
+			"mtu":            9000,
+			"route_exclude_address": []string{
+				"127.0.0.0/8",
+				"10.0.0.0/8",
+				"172.16.0.0/12",
+				"192.168.0.0/16",
+				"169.254.0.0/16",
+				"224.0.0.0/4",
+				"255.255.255.255/32",
+			},
+		},
+	}
+	if netcheck.Enabled() {
+		inbounds = append(inbounds, map[string]any{
+			"type":        "mixed",
+			"tag":         "regalia-netcheck",
+			"listen":      "127.0.0.1",
+			"listen_port": netcheck.Port,
+			"users": []any{
+				map[string]any{"username": netcheck.DirectUser, "password": netcheck.DirectPassword},
+				map[string]any{"username": netcheck.ProxyUser, "password": netcheck.ProxyPassword},
+			},
+		})
+	}
 	document := map[string]any{
 		"log": map[string]any{
 			"level":     "info",
@@ -70,28 +121,7 @@ func Build(snapshot state.State) (Result, error) {
 				},
 			},
 		},
-		"inbounds": []any{
-			map[string]any{
-				"type":           "tun",
-				"tag":            "tun-in",
-				"interface_name": "regalia0",
-				"address":        []string{tunCIDR},
-				"auto_route":     true,
-				"auto_redirect":  true,
-				"strict_route":   true,
-				"stack":          "system",
-				"mtu":            9000,
-				"route_exclude_address": []string{
-					"127.0.0.0/8",
-					"10.0.0.0/8",
-					"172.16.0.0/12",
-					"192.168.0.0/16",
-					"169.254.0.0/16",
-					"224.0.0.0/4",
-					"255.255.255.255/32",
-				},
-			},
-		},
+		"inbounds":  inbounds,
 		"outbounds": outbounds,
 		"route":     route,
 	}
@@ -162,17 +192,34 @@ func activeRoute(snapshot state.State) *state.RouteProfile {
 	return &route
 }
 
-func buildRoute(profile *state.RouteProfile) map[string]any {
+func buildRoute(profile *state.RouteProfile, netcheck NetcheckOptions) map[string]any {
 	final := "proxy"
 	var appRules []state.AppRule
 	if profile != nil {
 		final = profile.DefaultOutbound
 		appRules = profile.Apps
 	}
-	rules := []any{
+	rules := make([]any, 0, 6)
+	if netcheck.Enabled() {
+		rules = append(rules,
+			map[string]any{
+				"inbound":   "regalia-netcheck",
+				"auth_user": netcheck.DirectUser,
+				"action":    "route",
+				"outbound":  "direct",
+			},
+			map[string]any{
+				"inbound":   "regalia-netcheck",
+				"auth_user": netcheck.ProxyUser,
+				"action":    "route",
+				"outbound":  "proxy",
+			},
+		)
+	}
+	rules = append(rules,
 		map[string]any{"action": "sniff"},
 		map[string]any{"protocol": "dns", "action": "hijack-dns"},
-	}
+	)
 	for _, outbound := range []string{"direct", "proxy"} {
 		var processPaths []string
 		for _, rule := range appRules {

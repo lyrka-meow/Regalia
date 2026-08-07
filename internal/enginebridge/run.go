@@ -9,11 +9,42 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/lyrka-meow/Regalia/internal/engineconfig"
 )
+
+const maxEngineLogSize = 1024 * 1024
+
+type boundedLog struct {
+	file *os.File
+	mu   sync.Mutex
+}
+
+func (log *boundedLog) Write(content []byte) (int, error) {
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	info, err := log.file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	if info.Size()+int64(len(content)) > maxEngineLogSize {
+		if err := log.file.Truncate(0); err != nil {
+			return 0, err
+		}
+	}
+	return log.file.Write(content)
+}
+
+func (log *boundedLog) WriteString(content string) (int, error) {
+	return log.Write([]byte(content))
+}
+
+func (log *boundedLog) Close() error {
+	return log.file.Close()
+}
 
 func Run(configPath, binaryPath, logPath string) error {
 	configuration, err := readPrivateConfiguration(configPath)
@@ -45,7 +76,7 @@ func Run(configPath, binaryPath, logPath string) error {
 	return nil
 }
 
-func openPrivateLog(path string) (*os.File, error) {
+func openPrivateLog(path string) (*boundedLog, error) {
 	fileDescriptor, err := syscall.Open(
 		path,
 		syscall.O_WRONLY|syscall.O_APPEND|syscall.O_CREAT|syscall.O_CLOEXEC|syscall.O_NOFOLLOW,
@@ -65,7 +96,7 @@ func openPrivateLog(path string) (*os.File, error) {
 		_ = file.Close()
 		return nil, errors.New("engine log must be a private regular file owned by the service user")
 	}
-	return file, nil
+	return &boundedLog{file: file}, nil
 }
 
 func readPrivateConfiguration(path string) ([]byte, error) {

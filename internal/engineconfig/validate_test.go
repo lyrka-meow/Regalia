@@ -45,7 +45,20 @@ func TestRejectsAdditionalInbound(t *testing.T) {
 		"listen":      "0.0.0.0",
 		"listen_port": 1080,
 	})
-	assertRejected(t, configuration, "exactly one inbound")
+	assertRejected(t, configuration, "unexpected inbound tag")
+}
+
+func TestValidateGeneratedNetcheckConfiguration(t *testing.T) {
+	result, err := config.BuildWithOptions(validState(), config.NetcheckOptions{
+		Port: 43123, DirectUser: "direct", DirectPassword: "direct-secret",
+		ProxyUser: "proxy", ProxyPassword: "proxy-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(result.JSON); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestRejectsPrivilegedTopLevelFeatures(t *testing.T) {

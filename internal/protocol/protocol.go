@@ -2,7 +2,7 @@ package protocol
 
 import "encoding/json"
 
-const Version = 4
+const Version = 5
 
 type Request struct {
 	ID     int64           `json:"id"`

@@ -59,6 +59,11 @@ fi
 
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/regalia"
 mkdir -p "$state_dir"
+find "$state_dir" -maxdepth 1 -type f -name 'install-*.log' -mtime +30 -delete 2>/dev/null || true
+mapfile -t stale_install_logs < <(find "$state_dir" -maxdepth 1 -type f -name 'install-*.log' -printf '%T@ %p\n' 2>/dev/null | sort -rn | tail -n +6 | cut -d' ' -f2-)
+if (( ${#stale_install_logs[@]} > 0 )); then
+    rm -f -- "${stale_install_logs[@]}"
+fi
 log_file="$state_dir/install-$(date +%Y%m%d-%H%M%S).log"
 tmp_dir=$(mktemp -d)
 source_dir="$tmp_dir/source"

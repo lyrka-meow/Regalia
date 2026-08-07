@@ -35,3 +35,15 @@ func State() (string, error) {
 	}
 	return filepath.Join(home, ".config", "regalia", "state.json"), nil
 }
+
+func NetcheckHistory() (string, error) {
+	stateHome := os.Getenv("XDG_STATE_HOME")
+	if stateHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home directory: %w", err)
+		}
+		stateHome = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(stateHome, "regalia", "netchecks.json"), nil
+}

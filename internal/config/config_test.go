@@ -53,6 +53,28 @@ func TestGeneratedConfigurationPassesSingBoxCheck(t *testing.T) {
 	}
 }
 
+func TestGeneratedNetcheckConfigurationPassesSingBoxCheck(t *testing.T) {
+	binary := os.Getenv("REGALIA_SING_BOX")
+	if binary == "" {
+		t.Skip("REGALIA_SING_BOX is not set")
+	}
+	result, err := BuildWithOptions(readySnapshot(), NetcheckOptions{
+		Port: 43123, DirectUser: "direct", DirectPassword: "direct-secret",
+		ProxyUser: "proxy", ProxyPassword: "proxy-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(configPath, result.JSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(binary, "check", "--disable-color", "-c", configPath)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("sing-box netcheck config failed: %v\n%s", err, output)
+	}
+}
+
 func readySnapshot() state.State {
 	outbound := json.RawMessage(`{
 		"type":"trojan",

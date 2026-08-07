@@ -54,6 +54,9 @@ from that page; removal keeps the user's subscriptions and routing profiles.
 - start and stop sing-box through a capability-restricted systemd service;
 - remember whether VPN is enabled and restore it when the user service starts;
 - expose the state through a private per-user Unix socket.
+- run an on-demand direct/VPN connection-quality comparison without changing
+  routes of other applications;
+- keep at most 20 test results for 30 days, with no unbounded diagnostic log.
 
 The engine controller reports `unavailable`, `stopped`, `starting`,
 `connected`, `stopping`, or `failed`. A connection is reported as active only

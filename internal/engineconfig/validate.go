@@ -23,13 +23,14 @@ func Validate(raw []byte) error {
 	if err := onlyKeys(document, "log", "certificate", "dns", "inbounds", "outbounds", "endpoints", "route"); err != nil {
 		return fmt.Errorf("top level: %w", err)
 	}
-	if err := validateTUN(document["inbounds"]); err != nil {
+	hasNetcheck, err := validateInbounds(document["inbounds"])
+	if err != nil {
 		return err
 	}
 	if err := validateOutbounds(document["outbounds"], document["endpoints"]); err != nil {
 		return err
 	}
-	if err := validateRoute(document["route"]); err != nil {
+	if err := validateRoute(document["route"], hasNetcheck); err != nil {
 		return err
 	}
 	if _, ok := document["dns"].(map[string]any); !ok {
@@ -38,15 +39,40 @@ func Validate(raw []byte) error {
 	return nil
 }
 
-func validateTUN(value any) error {
+func validateInbounds(value any) (bool, error) {
 	inbounds, ok := value.([]any)
-	if !ok || len(inbounds) != 1 {
-		return errors.New("exactly one inbound is required")
+	if !ok || len(inbounds) < 1 || len(inbounds) > 2 {
+		return false, errors.New("one TUN and at most one netcheck inbound are required")
 	}
-	tun, ok := inbounds[0].(map[string]any)
-	if !ok {
-		return errors.New("TUN inbound must be an object")
+	tunCount := 0
+	netcheckCount := 0
+	for _, value := range inbounds {
+		inbound, ok := value.(map[string]any)
+		if !ok {
+			return false, errors.New("inbound must be an object")
+		}
+		switch stringValue(inbound["tag"]) {
+		case "tun-in":
+			tunCount++
+			if err := validateTUN(inbound); err != nil {
+				return false, err
+			}
+		case "regalia-netcheck":
+			netcheckCount++
+			if err := validateNetcheckInbound(inbound); err != nil {
+				return false, err
+			}
+		default:
+			return false, fmt.Errorf("unexpected inbound tag %q", stringValue(inbound["tag"]))
+		}
 	}
+	if tunCount != 1 || netcheckCount > 1 {
+		return false, errors.New("one Regalia TUN and at most one netcheck inbound are required")
+	}
+	return netcheckCount == 1, nil
+}
+
+func validateTUN(tun map[string]any) error {
 	if err := onlyKeys(tun,
 		"type", "tag", "interface_name", "address", "auto_route", "auto_redirect",
 		"strict_route", "stack", "mtu", "route_exclude_address"); err != nil {
@@ -66,6 +92,43 @@ func validateTUN(value any) error {
 	addresses, ok := stringList(tun["address"])
 	if !ok || len(addresses) != 1 || addresses[0] != "172.19.0.1/30" {
 		return errors.New("unexpected TUN address")
+	}
+	return nil
+}
+
+func validateNetcheckInbound(inbound map[string]any) error {
+	if err := onlyKeys(inbound, "type", "tag", "listen", "listen_port", "users"); err != nil {
+		return fmt.Errorf("netcheck inbound: %w", err)
+	}
+	if stringValue(inbound["type"]) != "mixed" || stringValue(inbound["tag"]) != "regalia-netcheck" {
+		return errors.New("netcheck inbound must be the Regalia mixed proxy")
+	}
+	if stringValue(inbound["listen"]) != "127.0.0.1" {
+		return errors.New("netcheck inbound must listen on IPv4 loopback")
+	}
+	port, ok := numberValue(inbound["listen_port"])
+	if !ok || port < 1024 || port > 65535 {
+		return errors.New("netcheck inbound uses an invalid port")
+	}
+	users, ok := inbound["users"].([]any)
+	if !ok || len(users) != 2 {
+		return errors.New("netcheck inbound requires exactly two authenticated users")
+	}
+	seen := map[string]bool{}
+	for _, value := range users {
+		user, ok := value.(map[string]any)
+		if !ok {
+			return errors.New("netcheck user must be an object")
+		}
+		if err := onlyKeys(user, "username", "password"); err != nil {
+			return fmt.Errorf("netcheck user: %w", err)
+		}
+		username := stringValue(user["username"])
+		password := stringValue(user["password"])
+		if username == "" || password == "" || seen[username] {
+			return errors.New("netcheck users require unique non-empty credentials")
+		}
+		seen[username] = true
 	}
 	return nil
 }
@@ -120,7 +183,7 @@ func validateOutbounds(outboundValue, endpointValue any) error {
 	return nil
 }
 
-func validateRoute(value any) error {
+func validateRoute(value any, expectNetcheck bool) error {
 	route, ok := value.(map[string]any)
 	if !ok {
 		return errors.New("route must be an object")
@@ -140,6 +203,14 @@ func validateRoute(value any) error {
 	if !ok || len(rules) < 2 {
 		return errors.New("route must contain sniff and DNS rules")
 	}
+	sniffIndex := 0
+	if expectNetcheck {
+		if len(rules) < 4 {
+			return errors.New("netcheck inbound requires direct and proxy route rules")
+		}
+		sniffIndex = 2
+	}
+	netcheckUsers := map[string]bool{}
 	for index, value := range rules {
 		rule, ok := value.(map[string]any)
 		if !ok {
@@ -148,23 +219,37 @@ func validateRoute(value any) error {
 		action := stringValue(rule["action"])
 		switch action {
 		case "sniff":
-			if index != 0 || len(rule) != 1 {
+			if index != sniffIndex || len(rule) != 1 {
 				return errors.New("sniff must be the first plain rule")
 			}
 		case "hijack-dns":
-			if index != 1 || stringValue(rule["protocol"]) != "dns" {
+			if index != sniffIndex+1 || stringValue(rule["protocol"]) != "dns" {
 				return errors.New("DNS hijack must be the second rule")
 			}
 			if err := onlyKeys(rule, "protocol", "action"); err != nil {
 				return fmt.Errorf("DNS rule: %w", err)
 			}
 		case "route":
-			if err := onlyKeys(rule, "process_path", "action", "outbound"); err != nil {
-				return fmt.Errorf("application rule: %w", err)
-			}
 			outbound := stringValue(rule["outbound"])
 			if outbound != "proxy" && outbound != "direct" {
 				return errors.New("application rule outbound must be proxy or direct")
+			}
+			if inbound := stringValue(rule["inbound"]); inbound != "" {
+				user := stringValue(rule["auth_user"])
+				if !expectNetcheck || index >= 2 || inbound != "regalia-netcheck" || user == "" || netcheckUsers[user] {
+					return errors.New("invalid netcheck route rule")
+				}
+				if (index == 0 && outbound != "direct") || (index == 1 && outbound != "proxy") {
+					return errors.New("netcheck rules must route direct before proxy")
+				}
+				if err := onlyKeys(rule, "inbound", "auth_user", "action", "outbound"); err != nil {
+					return fmt.Errorf("netcheck rule: %w", err)
+				}
+				netcheckUsers[user] = true
+				continue
+			}
+			if err := onlyKeys(rule, "process_path", "action", "outbound"); err != nil {
+				return fmt.Errorf("application rule: %w", err)
 			}
 			paths, ok := stringList(rule["process_path"])
 			if !ok || len(paths) == 0 {
@@ -178,6 +263,9 @@ func validateRoute(value any) error {
 		default:
 			return fmt.Errorf("unsupported route action %q", action)
 		}
+	}
+	if expectNetcheck && len(netcheckUsers) != 2 {
+		return errors.New("netcheck inbound requires two unique route users")
 	}
 	return nil
 }
@@ -214,4 +302,12 @@ func stringList(value any) ([]string, bool) {
 		result = append(result, text)
 	}
 	return result, true
+}
+
+func numberValue(value any) (int, bool) {
+	number, ok := value.(float64)
+	if !ok || number != float64(int(number)) {
+		return 0, false
+	}
+	return int(number), true
 }

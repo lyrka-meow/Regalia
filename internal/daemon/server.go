@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,23 +11,42 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/lyrka-meow/Regalia/internal/apps"
 	"github.com/lyrka-meow/Regalia/internal/config"
 	"github.com/lyrka-meow/Regalia/internal/engine"
+	"github.com/lyrka-meow/Regalia/internal/netcheck"
+	"github.com/lyrka-meow/Regalia/internal/paths"
 	"github.com/lyrka-meow/Regalia/internal/protocol"
 	"github.com/lyrka-meow/Regalia/internal/state"
 	"github.com/lyrka-meow/Regalia/internal/subscription"
 )
 
 type Server struct {
-	socketPath string
-	store      *state.Store
-	fetcher    *subscription.Fetcher
-	engine     engine.Controller
-	vpnMu      sync.Mutex
-	restoreMu  sync.RWMutex
-	restoreErr string
+	socketPath      string
+	store           *state.Store
+	fetcher         *subscription.Fetcher
+	engine          engine.Controller
+	vpnMu           sync.Mutex
+	restoreMu       sync.RWMutex
+	restoreErr      string
+	netcheckOptions config.NetcheckOptions
+	netcheckHistory *netcheck.History
+	netcheckMu      sync.Mutex
+	netcheckJob     *networkTestJob
+}
+
+type networkTestJob struct {
+	ID        string           `json:"id"`
+	State     string           `json:"state"`
+	Mode      string           `json:"mode"`
+	Phase     string           `json:"phase"`
+	Percent   int              `json:"percent"`
+	StartedAt string           `json:"startedAt"`
+	Error     string           `json:"error,omitempty"`
+	Result    *netcheck.Result `json:"result,omitempty"`
+	cancel    context.CancelFunc
 }
 
 type profileView struct {
@@ -63,11 +83,17 @@ func NewWithEngine(socketPath string, store *state.Store, controller engine.Cont
 	if controller == nil {
 		controller = engine.NewUnavailable("VPN engine controller is not configured")
 	}
+	historyPath, err := paths.NetcheckHistory()
+	if err != nil {
+		historyPath = filepath.Join(paths.RuntimeDirectory(), "netchecks.json")
+	}
 	return &Server{
-		socketPath: socketPath,
-		store:      store,
-		fetcher:    subscription.NewFetcher(),
-		engine:     controller,
+		socketPath:      socketPath,
+		store:           store,
+		fetcher:         subscription.NewFetcher(),
+		engine:          controller,
+		netcheckOptions: newNetcheckOptions(),
+		netcheckHistory: netcheck.NewHistory(historyPath),
 	}
 }
 
@@ -344,6 +370,42 @@ func (s *Server) dispatch(method string, raw json.RawMessage) (any, *protocol.Er
 			return nil, invalidParams(err)
 		}
 		return emptyOrError(s.store.RemoveAppRule(params.RouteID, params.ProcessPath))
+	case "network.test.start":
+		var params struct {
+			Mode    string                  `json:"mode"`
+			Network netcheck.NetworkContext `json:"network"`
+		}
+		if err := decodeParams(raw, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		return s.startNetworkTest(params.Mode, params.Network)
+	case "network.test.status":
+		var params struct {
+			ID string `json:"id"`
+		}
+		if err := decodeParams(raw, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		return s.networkTestStatus(params.ID)
+	case "network.test.cancel":
+		var params struct {
+			ID string `json:"id"`
+		}
+		if err := decodeParams(raw, &params); err != nil {
+			return nil, invalidParams(err)
+		}
+		return s.cancelNetworkTest(params.ID)
+	case "network.test.history":
+		results, err := s.netcheckHistory.List()
+		if err != nil {
+			return nil, &protocol.Error{Code: "history_failed", Message: err.Error()}
+		}
+		return map[string]any{"items": results, "maxItems": 20, "maxAgeDays": 30}, nil
+	case "network.test.history.clear":
+		if err := s.netcheckHistory.Clear(); err != nil {
+			return nil, &protocol.Error{Code: "history_failed", Message: err.Error()}
+		}
+		return map[string]bool{"ok": true}, nil
 	default:
 		return nil, &protocol.Error{Code: "method_not_found", Message: "unknown method: " + method}
 	}
@@ -362,6 +424,9 @@ func (s *Server) status() map[string]any {
 			"routes.processPath",
 			"apps.desktop",
 			"apps.processes",
+			"network.test",
+			"network.test.compare",
+			"network.test.history",
 		},
 		"enabled":         snapshot.VPNEnabled,
 		"engine":          engineStatus.State,
@@ -472,7 +537,10 @@ func (s *Server) reconcileVPN(enabled bool) error {
 		case engine.StateStopping:
 			return errors.New("VPN engine is stopping")
 		}
-		result, err := config.Build(s.store.Snapshot())
+		if !loopbackPortAvailable(s.netcheckOptions.Port) {
+			s.netcheckOptions = newNetcheckOptions()
+		}
+		result, err := config.BuildWithOptions(s.store.Snapshot(), s.netcheckOptions)
 		if err != nil {
 			return fmt.Errorf("%w: %v", errVPNConfigurationIncomplete, err)
 		}
@@ -491,6 +559,188 @@ func (s *Server) reconcileVPN(enabled bool) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Server) startNetworkTest(mode string, network netcheck.NetworkContext) (any, *protocol.Error) {
+	mode, err := netcheck.NormalizeMode(mode)
+	if err != nil {
+		return nil, invalidParams(err)
+	}
+	connected := s.engine.Status().State == engine.StateConnected
+	if (mode == "proxy" || mode == "compare") && !connected {
+		return nil, &protocol.Error{Code: "vpn_required", Message: "connect Regalia before testing the VPN route"}
+	}
+	s.netcheckMu.Lock()
+	if s.netcheckJob != nil && s.netcheckJob.State == "running" {
+		s.netcheckMu.Unlock()
+		return nil, &protocol.Error{Code: "test_busy", Message: "a network test is already running"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	now := time.Now().UTC()
+	job := &networkTestJob{
+		ID: fmt.Sprintf("netcheck-%d", now.UnixNano()), State: "running", Mode: mode,
+		Phase: "preparing", Percent: 0, StartedAt: now.Format(time.RFC3339), cancel: cancel,
+	}
+	s.netcheckJob = job
+	view := s.networkTestJobViewLocked()
+	s.netcheckMu.Unlock()
+	go s.runNetworkTest(ctx, job.ID, mode, network, connected)
+	return view, nil
+}
+
+func (s *Server) runNetworkTest(ctx context.Context, id, mode string, network netcheck.NetworkContext, connected bool) {
+	defer func() {
+		s.netcheckMu.Lock()
+		if s.netcheckJob != nil && s.netcheckJob.ID == id && s.netcheckJob.cancel != nil {
+			s.netcheckJob.cancel()
+			s.netcheckJob.cancel = nil
+		}
+		s.netcheckMu.Unlock()
+	}()
+	snapshot := s.store.Snapshot()
+	server := activeNetcheckServer(snapshot)
+	result := netcheck.Result{ID: id, Mode: mode, StartedAt: time.Now().UTC().Format(time.RFC3339), Network: network}
+	routes := []string{mode}
+	if mode == "compare" {
+		routes = []string{"direct", "proxy"}
+	}
+	for routeIndex, route := range routes {
+		proxy := netcheck.Proxy{}
+		if connected {
+			proxy.Port = s.netcheckOptions.Port
+			if route == "direct" {
+				proxy.Username = s.netcheckOptions.DirectUser
+				proxy.Password = s.netcheckOptions.DirectPassword
+			} else {
+				proxy.Username = s.netcheckOptions.ProxyUser
+				proxy.Password = s.netcheckOptions.ProxyPassword
+			}
+		}
+		measurement, err := netcheck.Run(ctx, route, proxy, server, func(phase string, percent int) {
+			overall := percent
+			if len(routes) == 2 {
+				overall = routeIndex*50 + percent/2
+			}
+			s.updateNetworkTest(id, route+":"+phase, overall)
+		})
+		if err != nil {
+			s.finishNetworkTestError(id, err)
+			return
+		}
+		result.Results = append(result.Results, measurement)
+	}
+	result.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+	netcheck.Compare(&result)
+	if err := s.netcheckHistory.Add(result); err != nil {
+		s.finishNetworkTestError(id, fmt.Errorf("save test history: %w", err))
+		return
+	}
+	s.netcheckMu.Lock()
+	if s.netcheckJob != nil && s.netcheckJob.ID == id {
+		s.netcheckJob.State = "completed"
+		s.netcheckJob.Phase = "done"
+		s.netcheckJob.Percent = 100
+		s.netcheckJob.Result = &result
+	}
+	s.netcheckMu.Unlock()
+}
+
+func (s *Server) updateNetworkTest(id, phase string, percent int) {
+	s.netcheckMu.Lock()
+	defer s.netcheckMu.Unlock()
+	if s.netcheckJob != nil && s.netcheckJob.ID == id && s.netcheckJob.State == "running" {
+		s.netcheckJob.Phase = phase
+		s.netcheckJob.Percent = percent
+	}
+}
+
+func (s *Server) finishNetworkTestError(id string, err error) {
+	s.netcheckMu.Lock()
+	defer s.netcheckMu.Unlock()
+	if s.netcheckJob == nil || s.netcheckJob.ID != id {
+		return
+	}
+	if errors.Is(err, context.Canceled) {
+		s.netcheckJob.State = "cancelled"
+		s.netcheckJob.Error = "test cancelled"
+	} else {
+		s.netcheckJob.State = "failed"
+		s.netcheckJob.Error = err.Error()
+	}
+}
+
+func (s *Server) networkTestStatus(id string) (any, *protocol.Error) {
+	s.netcheckMu.Lock()
+	defer s.netcheckMu.Unlock()
+	if s.netcheckJob == nil || id == "" || s.netcheckJob.ID != id {
+		return nil, &protocol.Error{Code: "test_not_found", Message: "network test was not found"}
+	}
+	return s.networkTestJobViewLocked(), nil
+}
+
+func (s *Server) cancelNetworkTest(id string) (any, *protocol.Error) {
+	s.netcheckMu.Lock()
+	defer s.netcheckMu.Unlock()
+	if s.netcheckJob == nil || id == "" || s.netcheckJob.ID != id {
+		return nil, &protocol.Error{Code: "test_not_found", Message: "network test was not found"}
+	}
+	if s.netcheckJob.State == "running" && s.netcheckJob.cancel != nil {
+		s.netcheckJob.cancel()
+	}
+	return s.networkTestJobViewLocked(), nil
+}
+
+func (s *Server) networkTestJobViewLocked() networkTestJob {
+	view := *s.netcheckJob
+	view.cancel = nil
+	return view
+}
+
+func activeNetcheckServer(snapshot state.State) netcheck.ServerContext {
+	for _, profile := range snapshot.Profiles {
+		for _, server := range profile.Servers {
+			if server.ID == snapshot.ActiveServerID {
+				return netcheck.ServerContext{ID: server.ID, Name: server.Name, Protocol: server.Protocol}
+			}
+		}
+	}
+	return netcheck.ServerContext{}
+}
+
+func newNetcheckOptions() config.NetcheckOptions {
+	return config.NetcheckOptions{
+		Port: pickLoopbackPort(), DirectUser: "direct", DirectPassword: randomSecret(),
+		ProxyUser: "proxy", ProxyPassword: randomSecret(),
+	}
+}
+
+func pickLoopbackPort() int {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 39481
+	}
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
+func loopbackPortAvailable(port int) bool {
+	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return false
+	}
+	return listener.Close() == nil
+}
+
+func randomSecret() string {
+	buffer := make([]byte, 24)
+	if _, err := rand.Read(buffer); err != nil {
+		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
+	}
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	for index := range buffer {
+		buffer[index] = alphabet[int(buffer[index])%len(alphabet)]
+	}
+	return string(buffer)
 }
 
 func (s *Server) requireStopped() *protocol.Error {

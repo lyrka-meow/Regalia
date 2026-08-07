@@ -18,7 +18,7 @@ Response:
 {
   "id": 1,
   "result": {
-    "apiVersion": 4,
+    "apiVersion": 5,
     "enabled": true,
     "connected": true,
     "engine": "connected",
@@ -47,7 +47,7 @@ Important response fields:
 
 | Field | Meaning |
 | --- | --- |
-| `apiVersion` | Current protocol version, presently `4` |
+| `apiVersion` | Current protocol version, presently `5` |
 | `capabilities` | Features the client may expose |
 | `enabled` | Persisted VPN toggle state |
 | `connected` | Engine is currently connected |
@@ -61,7 +61,7 @@ Important response fields:
 | `activeRoute` | Active route profile summary |
 
 The shell can poll `status` while the VPN page is visible. Event streaming is
-not part of API version 4 yet.
+not part of API version 5 yet.
 
 ## Setup screens
 
@@ -78,3 +78,29 @@ Use the remaining methods to build the settings UI:
 
 Responses never include imported subscription URLs, passwords, UUIDs, private
 keys, or raw sing-box outbound objects.
+
+## On-demand connection test
+
+API version 5 adds a bounded connection-quality test. It uses Cloudflare's
+public speed-test endpoints and runs only after an explicit user action.
+`direct` works without an active VPN. `proxy` and `compare` require the Regalia
+engine to be connected. When connected, a private authenticated loopback proxy
+routes the test explicitly through `direct` or `proxy`; the route of every
+other application remains unchanged.
+
+Start a test:
+
+```json
+{"id":10,"method":"network.test.start","params":{"mode":"compare","network":{"kind":"wifi","interface":"wlan0","name":"Home"}}}
+```
+
+Poll `network.test.status` with the returned test `id`, or cancel it with
+`network.test.cancel`. Phases are `latency`, `download`, and `upload`. A result
+reports Mbps, median HTTP latency, jitter, and HTTP request error rate for each
+route. The error rate is intentionally not called packet loss because proxy
+protocols do not provide a comparable ICMP measurement.
+
+History methods are `network.test.history` and
+`network.test.history.clear`. The private history file is capped at 20 results
+and automatically removes entries older than 30 days. No response bodies,
+proxy credentials, or verbose per-test logs are stored.

@@ -67,3 +67,27 @@ func TestOpenPrivateLogRejectsSymlink(t *testing.T) {
 		t.Fatal("expected symlink log to be rejected")
 	}
 }
+
+func TestPrivateLogIsBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "engine.log")
+	file, err := openPrivateLog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk := strings.Repeat("x", 64*1024)
+	for index := 0; index < 24; index++ {
+		if _, err := file.WriteString(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() > maxEngineLogSize {
+		t.Fatalf("engine log grew to %d bytes", info.Size())
+	}
+}

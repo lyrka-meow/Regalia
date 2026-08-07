@@ -183,7 +183,7 @@ func TestVPNLifecycleAndConfigurationLock(t *testing.T) {
 		t.Fatalf("engine received invalid configuration: %s", controller.configuration)
 	}
 	status := result.(map[string]any)
-	if status["apiVersion"] != 4 || status["enabled"] != true || status["engine"] != engine.StateConnected || status["connected"] != true || status["enginePid"] != 4242 {
+	if status["apiVersion"] != 5 || status["enabled"] != true || status["engine"] != engine.StateConnected || status["connected"] != true || status["enginePid"] != 4242 {
 		t.Fatalf("unexpected connected status: %#v", status)
 	}
 	activeServer, ok := status["activeServer"].(serverView)
@@ -233,6 +233,21 @@ func TestRestoreDesiredVPNState(t *testing.T) {
 	}
 	if status := server.status(); status["enabled"] != true || status["restoreError"] != nil {
 		t.Fatalf("unexpected restored status: %#v", status)
+	}
+}
+
+func TestNetworkProxyTestRequiresConnectedVPN(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeEngine{status: engine.Status{State: engine.StateStopped, Available: true}}
+	server := NewWithEngine(filepath.Join(t.TempDir(), "regaliad.sock"), store, controller)
+	if _, apiError := server.dispatch("network.test.start", params(t, map[string]any{"mode": "proxy"})); apiError == nil || apiError.Code != "vpn_required" {
+		t.Fatalf("proxy test returned %#v, want vpn_required", apiError)
+	}
+	if _, apiError := server.dispatch("network.test.start", params(t, map[string]any{"mode": "compare"})); apiError == nil || apiError.Code != "vpn_required" {
+		t.Fatalf("compare test returned %#v, want vpn_required", apiError)
 	}
 }
 
