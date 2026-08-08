@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -248,6 +249,18 @@ func TestNetworkProxyTestRequiresConnectedVPN(t *testing.T) {
 	}
 	if _, apiError := server.dispatch("network.test.start", params(t, map[string]any{"mode": "compare"})); apiError == nil || apiError.Code != "vpn_required" {
 		t.Fatalf("compare test returned %#v, want vpn_required", apiError)
+	}
+}
+
+func TestWaitForLoopbackListener(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := waitForLoopbackListener(context.Background(), port); err != nil {
+		t.Fatalf("listener was not detected: %v", err)
 	}
 }
 

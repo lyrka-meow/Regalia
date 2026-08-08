@@ -1,6 +1,8 @@
 package netcheck
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -85,5 +87,87 @@ func TestCompare(t *testing.T) {
 	if result.Compare == nil || result.Compare.DownloadDeltaPct != -25 ||
 		result.Compare.UploadDeltaPct != -50 || result.Compare.LatencyDeltaMs != 35 {
 		t.Fatalf("unexpected comparison: %#v", result.Compare)
+	}
+}
+
+func TestAssessRejectsUnstableComparison(t *testing.T) {
+	startSignal := -79.0
+	endSignal := -63.0
+	result := Result{
+		Status: "completed",
+		Network: NetworkContext{
+			Kind: "wifi", SignalStartDBm: &startSignal, SignalEndDBm: &endSignal,
+		},
+		Results: []Measurement{{LatencyMs: 200, JitterMs: 900}},
+	}
+	Assess(&result)
+	if result.Reliability != "unstable" {
+		t.Fatalf("reliability = %q, want unstable", result.Reliability)
+	}
+	for _, warning := range []string{"weak_wifi_signal", "wifi_signal_changed", "unstable_latency"} {
+		found := false
+		for _, actual := range result.Warnings {
+			found = found || actual == warning
+		}
+		if !found {
+			t.Fatalf("warnings %#v do not include %q", result.Warnings, warning)
+		}
+	}
+}
+
+func TestAssessAcceptsStableComparison(t *testing.T) {
+	signal := -55.0
+	result := Result{
+		Status:  "completed",
+		Network: NetworkContext{Kind: "wifi", SignalStartDBm: &signal, SignalEndDBm: &signal},
+		Results: []Measurement{
+			{LatencyMs: 40, JitterMs: 8},
+			{LatencyMs: 90, JitterMs: 20},
+		},
+	}
+	Assess(&result)
+	if result.Reliability != "reliable" || len(result.Warnings) != 0 {
+		t.Fatalf("unexpected assessment: %#v", result)
+	}
+}
+
+func TestAssessUsesSignalPercentWhenDBmIsUnavailable(t *testing.T) {
+	result := Result{
+		Status:  "completed",
+		Network: NetworkContext{Kind: "wifi", SignalPercent: 27},
+		Results: []Measurement{
+			{LatencyMs: 40, JitterMs: 8},
+			{LatencyMs: 90, JitterMs: 20},
+		},
+	}
+	Assess(&result)
+	if result.Reliability != "unstable" || len(result.Warnings) != 1 || result.Warnings[0] != "weak_wifi_signal" {
+		t.Fatalf("unexpected assessment: %#v", result)
+	}
+}
+
+func TestAssessRejectsLatencyDifferenceWithinMeasuredNoise(t *testing.T) {
+	result := Result{
+		Status: "completed",
+		Results: []Measurement{
+			{Route: "direct", LatencyMs: 224, JitterMs: 117},
+			{Route: "proxy", LatencyMs: 160, JitterMs: 44},
+		},
+	}
+	Assess(&result)
+	if result.Reliability != "unstable" || len(result.Warnings) != 1 || result.Warnings[0] != "unstable_latency" {
+		t.Fatalf("unexpected assessment: %#v", result)
+	}
+}
+
+func TestFailureCode(t *testing.T) {
+	if got := FailureCode(&testFailure{code: "download_failed", err: errors.New("broken")}); got != "download_failed" {
+		t.Fatalf("FailureCode() = %q", got)
+	}
+	if got := FailureCode(context.DeadlineExceeded); got != "test_timeout" {
+		t.Fatalf("deadline FailureCode() = %q", got)
+	}
+	if got := FailureCode(NewFailure("test_channel_unavailable", context.DeadlineExceeded)); got != "test_channel_unavailable" {
+		t.Fatalf("coded deadline FailureCode() = %q", got)
 	}
 }

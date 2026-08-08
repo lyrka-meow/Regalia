@@ -599,40 +599,55 @@ func (s *Server) runNetworkTest(ctx context.Context, id, mode string, network ne
 	}()
 	snapshot := s.store.Snapshot()
 	server := activeNetcheckServer(snapshot)
-	result := netcheck.Result{ID: id, Mode: mode, StartedAt: time.Now().UTC().Format(time.RFC3339), Network: network}
-	routes := []string{mode}
-	if mode == "compare" {
-		routes = []string{"direct", "proxy"}
+	if network.Kind == "wifi" {
+		network.SignalStartDBm = netcheck.WirelessSignalDBm(network.Interface)
 	}
-	for routeIndex, route := range routes {
-		proxy := netcheck.Proxy{}
-		if connected {
-			proxy.Port = s.netcheckOptions.Port
-			if route == "direct" {
-				proxy.Username = s.netcheckOptions.DirectUser
-				proxy.Password = s.netcheckOptions.DirectPassword
-			} else {
-				proxy.Username = s.netcheckOptions.ProxyUser
-				proxy.Password = s.netcheckOptions.ProxyPassword
-			}
+	result := netcheck.Result{
+		ID: id, Mode: mode, Status: "running",
+		StartedAt: time.Now().UTC().Format(time.RFC3339), Network: network,
+	}
+	if connected {
+		s.updateNetworkTest(id, "preparing", 2)
+		readyContext, cancelReady := context.WithTimeout(ctx, 8*time.Second)
+		err := waitForLoopbackListener(readyContext, s.netcheckOptions.Port)
+		cancelReady()
+		if err != nil {
+			s.finishNetworkTestError(id, netcheck.NewFailure("test_channel_unavailable",
+				fmt.Errorf("wait for network test channel: %w", err)), &result)
+			return
 		}
-		measurement, err := netcheck.Run(ctx, route, proxy, server, func(phase string, percent int) {
-			overall := percent
-			if len(routes) == 2 {
-				overall = routeIndex*50 + percent/2
-			}
-			s.updateNetworkTest(id, route+":"+phase, overall)
+	}
+	if mode == "compare" {
+		measurements, err := netcheck.RunComparison(ctx,
+			s.networkTestProxy("direct", connected),
+			s.networkTestProxy("proxy", connected),
+			server, func(route, phase string, percent int) {
+				s.updateNetworkTest(id, route+":"+phase, percent)
+			})
+		result.Results = measurements
+		if err != nil {
+			s.finishNetworkTestError(id, err, &result)
+			return
+		}
+	} else {
+		measurement, err := netcheck.Run(ctx, mode, s.networkTestProxy(mode, connected), server, func(phase string, percent int) {
+			s.updateNetworkTest(id, mode+":"+phase, percent)
 		})
 		if err != nil {
-			s.finishNetworkTestError(id, err)
+			s.finishNetworkTestError(id, err, &result)
 			return
 		}
 		result.Results = append(result.Results, measurement)
 	}
+	if result.Network.Kind == "wifi" {
+		result.Network.SignalEndDBm = netcheck.WirelessSignalDBm(result.Network.Interface)
+	}
+	result.Status = "completed"
 	result.FinishedAt = time.Now().UTC().Format(time.RFC3339)
 	netcheck.Compare(&result)
+	netcheck.Assess(&result)
 	if err := s.netcheckHistory.Add(result); err != nil {
-		s.finishNetworkTestError(id, fmt.Errorf("save test history: %w", err))
+		s.finishNetworkTestError(id, fmt.Errorf("save test history: %w", err), nil)
 		return
 	}
 	s.netcheckMu.Lock()
@@ -645,6 +660,21 @@ func (s *Server) runNetworkTest(ctx context.Context, id, mode string, network ne
 	s.netcheckMu.Unlock()
 }
 
+func (s *Server) networkTestProxy(route string, connected bool) netcheck.Proxy {
+	if !connected {
+		return netcheck.Proxy{}
+	}
+	proxy := netcheck.Proxy{Port: s.netcheckOptions.Port}
+	if route == "direct" {
+		proxy.Username = s.netcheckOptions.DirectUser
+		proxy.Password = s.netcheckOptions.DirectPassword
+	} else {
+		proxy.Username = s.netcheckOptions.ProxyUser
+		proxy.Password = s.netcheckOptions.ProxyPassword
+	}
+	return proxy
+}
+
 func (s *Server) updateNetworkTest(id, phase string, percent int) {
 	s.netcheckMu.Lock()
 	defer s.netcheckMu.Unlock()
@@ -654,19 +684,38 @@ func (s *Server) updateNetworkTest(id, phase string, percent int) {
 	}
 }
 
-func (s *Server) finishNetworkTestError(id string, err error) {
+func (s *Server) finishNetworkTestError(id string, err error, result *netcheck.Result) {
+	cancelled := errors.Is(err, context.Canceled)
+	if result != nil {
+		if result.Network.Kind == "wifi" {
+			result.Network.SignalEndDBm = netcheck.WirelessSignalDBm(result.Network.Interface)
+		}
+		result.FinishedAt = time.Now().UTC().Format(time.RFC3339)
+		if cancelled {
+			result.Status = "cancelled"
+		} else {
+			result.Status = "failed"
+			result.ErrorCode = netcheck.FailureCode(err)
+			result.Error = err.Error()
+			netcheck.Assess(result)
+			if historyErr := s.netcheckHistory.Add(*result); historyErr != nil {
+				err = fmt.Errorf("%v; save failure history: %w", err, historyErr)
+			}
+		}
+	}
 	s.netcheckMu.Lock()
 	defer s.netcheckMu.Unlock()
 	if s.netcheckJob == nil || s.netcheckJob.ID != id {
 		return
 	}
-	if errors.Is(err, context.Canceled) {
+	if cancelled {
 		s.netcheckJob.State = "cancelled"
 		s.netcheckJob.Error = "test cancelled"
 	} else {
 		s.netcheckJob.State = "failed"
 		s.netcheckJob.Error = err.Error()
 	}
+	s.netcheckJob.Result = result
 }
 
 func (s *Server) networkTestStatus(id string) (any, *protocol.Error) {
@@ -729,6 +778,21 @@ func loopbackPortAvailable(port int) bool {
 		return false
 	}
 	return listener.Close() == nil
+}
+
+func waitForLoopbackListener(ctx context.Context, port int) error {
+	address := fmt.Sprintf("127.0.0.1:%d", port)
+	for {
+		connection, err := net.DialTimeout("tcp", address, 200*time.Millisecond)
+		if err == nil {
+			return connection.Close()
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 func randomSecret() string {
